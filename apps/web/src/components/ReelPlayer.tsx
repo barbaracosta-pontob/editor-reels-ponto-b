@@ -15,6 +15,12 @@ const FPS = 30;
 const WIDTH = 1080;
 const HEIGHT = 1920;
 
+// O Remotion pre-monta tags <Html5Audio /> compartilhadas (padrao 5) para driblar o
+// autoplay do browser. Cada cena tem SFX + o video de fundo tem audio; em transicoes
+// varios tocam ao mesmo tempo e estouram o limite. O schema permite ate 15 cenas, entao
+// reservamos folga (15 SFX + video + margem). Valor constante evita remount do Player.
+const NUMBER_OF_SHARED_AUDIO_TAGS = 20;
+
 interface ReelPlayerProps {
   props: ReelProps;
   initialFrame?: number;
@@ -45,6 +51,7 @@ export function ReelPlayer({ props, initialFrame = 0 }: ReelPlayerProps) {
       compositionWidth={WIDTH}
       compositionHeight={HEIGHT}
       fps={FPS}
+      numberOfSharedAudioTags={NUMBER_OF_SHARED_AUDIO_TAGS}
       style={{
         width: "100%",
         height: "100%",

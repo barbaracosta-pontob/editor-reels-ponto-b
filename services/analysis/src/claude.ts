@@ -5,8 +5,12 @@ import { ReelPropsSchema, type ReelProps } from "@pontob/schema";
 import { SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT, buildUserPrompt, buildRefinePrompt, PROMPT_VERSION } from "./prompt";
 
 const DEFAULT_MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6";
-const MAX_TOKENS = 4096;
-const MAX_TOKENS_REFINE = 8192; // refine escreve bloco <diagnostico> antes do JSON
+// O prompt pede um bloco <analise>/<diagnostico> extenso (chain-of-thought) ANTES do JSON.
+// Esse raciocinio sozinho consome ~2.5-3k tokens; somado ao JSON de 9-15 cenas, 4096 estoura
+// e o JSON e truncado no meio (stop_reason "max_tokens") -> JSON.parse falha -> "JSON invalido".
+// Orcamento generoso + escalonamento por tentativa evitam o corte.
+const MAX_TOKENS = 16000;
+const MAX_TOKENS_REFINE = 16000; // refine escreve bloco <diagnostico> antes do JSON
 
 export type AnalyzeParams = {
   transcript: object;
@@ -364,9 +368,12 @@ export async function analyze(
       });
     }
 
+    // Escalona o orcamento a cada tentativa: se a anterior truncou, a proxima tem mais folga.
+    const maxTokens = MAX_TOKENS + (tentativa - 1) * 8000;
+
     const response = await client.messages.create({
       model,
-      max_tokens: MAX_TOKENS,
+      max_tokens: maxTokens,
       temperature,
       system: [
         {
@@ -391,6 +398,18 @@ export async function analyze(
       );
     }
     ultimaResposta = textBlock.text;
+
+    // Truncamento por limite de tokens: o JSON foi cortado no meio. Retentar com o mesmo
+    // orcamento so repetiria o corte — a proxima iteracao ja escalona max_tokens.
+    if (response.stop_reason === "max_tokens") {
+      console.error(
+        `[analyze] tentativa ${tentativa}: resposta TRUNCADA (stop_reason=max_tokens, ` +
+        `max_tokens=${maxTokens}, output=${response.usage.output_tokens}). ` +
+        `O bloco <analise> consumiu o orcamento antes de fechar o JSON. Escalando na proxima tentativa...`,
+      );
+      ultimoErroZod = undefined;
+      continue;
+    }
 
     // Remove bloco <analise> (chain-of-thought) e markdown, extrai JSON
     let parsed: unknown;
@@ -507,9 +526,11 @@ export async function refine(
       });
     }
 
+    const maxTokens = MAX_TOKENS_REFINE + (tentativa - 1) * 8000;
+
     const response = await client.messages.create({
       model,
-      max_tokens: MAX_TOKENS_REFINE,
+      max_tokens: maxTokens,
       temperature: temperaturas[tentativa - 1],
       system: [{ type: "text", text: REFINE_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
       messages,
@@ -523,6 +544,15 @@ export async function refine(
     const textBlock = response.content.find((b) => b.type === "text");
     if (!textBlock || textBlock.type !== "text") throw new AnalysisError("Resposta sem texto", tentativa);
     ultimaResposta = textBlock.text;
+
+    if (response.stop_reason === "max_tokens") {
+      console.error(
+        `[refine] tentativa ${tentativa}: resposta TRUNCADA (stop_reason=max_tokens, ` +
+        `max_tokens=${maxTokens}, output=${response.usage.output_tokens}). Escalando na proxima tentativa...`,
+      );
+      ultimoErroZod = undefined;
+      continue;
+    }
 
     // Remove bloco <diagnostico> (chain-of-thought) e extrai JSON
     const jsonText = stripAnalysisBlock(ultimaResposta);
