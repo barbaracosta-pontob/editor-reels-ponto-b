@@ -39,7 +39,7 @@ echo.
 set INSTANCE_TOKEN=%RANDOM%%RANDOM%%RANDOM%
 set TOKEN_FILE=%PROJECT_DIR%scripts\.instance-locks\token-%INSTANCE_TOKEN%.port
 
-start "PontoB Server" cmd /k "cd /d "%PROJECT_DIR%" && set INSTANCE_TOKEN=%INSTANCE_TOKEN% && node scripts\dev-instance.js"
+start "PontoB Server" cmd /k "cd /d "%PROJECT_DIR%" && set "INSTANCE_TOKEN=%INSTANCE_TOKEN%" && node scripts\dev-instance.js"
 
 :: Aguarda o dev-instance.js decidir e publicar a porta escolhida
 echo  Aguardando servidor escolher porta...
