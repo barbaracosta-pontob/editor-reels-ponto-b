@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=@pontob/web",
+    "dev:instance": "node scripts/dev-instance.js",
     "dev:remotion": "npm run dev --workspace=@pontob/remotion",
     "build:remotion": "npm run build --workspace=@pontob/remotion",
     "render": "npm run render --workspace=@pontob/remotion",

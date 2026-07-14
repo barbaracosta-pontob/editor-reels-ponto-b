@@ -219,7 +219,7 @@ export async function POST(req: NextRequest) {
  */
 export async function GET() {
   try {
-    const jobsDir = path.join(REPO_ROOT, "jobs");
+    const jobsDir = JOBS_DIR;
     if (!existsSync(jobsDir)) return Response.json([]);
 
     const entries = readdirSync(jobsDir, { withFileTypes: true });

@@ -25,8 +25,12 @@ remotion-out/
 # Vídeos e dados sensíveis
 samples/
 jobs/
+jobs-instance*/
 !apps/web/src/app/jobs/
 !apps/web/src/app/api/jobs/
+
+# Locks de instancias locais (dev-instance.js)
+scripts/.instance-locks/
 
 # Banco SQLite local
 data/
