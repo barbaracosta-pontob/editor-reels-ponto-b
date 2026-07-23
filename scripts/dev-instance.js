@@ -5,12 +5,19 @@
  * Instancia 1 usa porta/JOBS_DIR padrao do .env; a partir da 2a usa
  * JOBS_DIR isolado (./jobs-instanceN) pra nao conflitar arquivos de job.
  *
- * Usa lockfile (nao porta TCP) pra decidir o slot: o Next.js demora alguns
- * segundos pra de fato bindar a porta apos o processo subir, entao checar
- * porta livre sozinho tem race condition se o usuario clicar 2x rapido.
- * Criar arquivo com flag "wx" (falha se ja existe) e imediato/atomico.
+ * Slot decidido por lockfile (nao so por porta TCP): o Next.js demora
+ * alguns segundos pra de fato bindar a porta apos o processo subir, entao
+ * confiar so em "porta livre" tem race condition se o usuario clicar 2x
+ * rapido. Criar arquivo com flag "wx" (falha se ja existe) e imediato.
+ *
+ * Mas o lockfile sozinho tambem nao basta: outro processo qualquer (ex:
+ * "npm run dev:remotion", que sobe Remotion Studio na mesma faixa de
+ * porta) pode estar usando a porta sem a gente saber. Por isso, alem do
+ * lockfile, faz uma checagem real de bind na porta antes de aceitar o
+ * slot como livre.
  */
-const { spawn } = require("node:child_process");
+const { spawn, execSync } = require("node:child_process");
+const net = require("node:net");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -27,7 +34,16 @@ function isPidAlive(pid) {
   }
 }
 
-function claimSlot() {
+function isPortReallyFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once("error", () => resolve(false));
+    srv.once("listening", () => srv.close(() => resolve(true)));
+    srv.listen(port); // sem host fixo: mesmo comportamento de bind que o Next usa
+  });
+}
+
+async function claimSlot() {
   fs.mkdirSync(LOCK_DIR, { recursive: true });
 
   for (let n = 1; n <= MAX_INSTANCES; n++) {
@@ -35,9 +51,12 @@ function claimSlot() {
 
     if (fs.existsSync(lockFile)) {
       const pid = parseInt(fs.readFileSync(lockFile, "utf-8").trim(), 10);
-      if (isPidAlive(pid)) continue; // slot em uso de verdade
+      if (isPidAlive(pid)) continue; // slot em uso de verdade por outra instancia nossa
       fs.unlinkSync(lockFile); // lock orfao (processo morreu sem limpar)
     }
+
+    const port = BASE_PORT + n - 1;
+    if (!(await isPortReallyFree(port))) continue; // porta ocupada por algo fora do nosso controle
 
     try {
       // wx: falha se outro processo criou o arquivo entre o existsSync e aqui
@@ -53,8 +72,8 @@ function claimSlot() {
   throw new Error(`Nenhum slot livre entre 1 e ${MAX_INSTANCES}`);
 }
 
-function main() {
-  const { n, lockFile } = claimSlot();
+async function main() {
+  const { n, lockFile } = await claimSlot();
   const port = BASE_PORT + n - 1;
   const env = { ...process.env };
 
@@ -63,8 +82,19 @@ function main() {
     env.JOBS_DIR = `./jobs-instance${n}`;
   }
 
+  let child;
+
   const cleanup = () => {
     try { fs.unlinkSync(lockFile); } catch {}
+    // No Windows, fechar so o processo pai (esta janela) nao mata os
+    // processos-filho (npm -> next -> servidor). Sem isso o servidor Next
+    // fica orfao, preso na porta, e o proximo clique acha o slot "livre"
+    // (lockfile sumiu) mas a porta continua ocupada -> EADDRINUSE.
+    if (child && child.pid && process.platform === "win32") {
+      try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: "ignore" }); } catch {}
+    } else if (child) {
+      try { child.kill(); } catch {}
+    }
   };
   process.on("exit", cleanup);
   process.on("SIGINT", () => process.exit(0));
@@ -81,14 +111,17 @@ function main() {
     process.on("exit", () => { try { fs.unlinkSync(tokenFile); } catch {} });
   }
 
-  const child = spawn("npm", ["run", "dev", "--workspace=@pontob/web"], {
+  child = spawn("npm run dev --workspace=@pontob/web", {
     cwd: path.resolve(__dirname, ".."),
     env,
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: true,
   });
 
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
-main();
+main().catch((err) => {
+  console.error(String(err));
+  process.exit(1);
+});

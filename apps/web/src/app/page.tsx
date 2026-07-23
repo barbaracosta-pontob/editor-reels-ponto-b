@@ -85,18 +85,21 @@ export default function Home() {
         for (const event of events) {
           const line = event.replace(/^data:\s*/m, "").trim();
           if (!line) continue;
+          let msg;
           try {
-            const msg = JSON.parse(line);
-            if (msg.type === "step") {
-              setProcessingStep(msg.step as ProcessingStep);
-            } else if (msg.type === "done") {
-              setJob(msg.job as Job);
-              setScreen("editor");
-              return;
-            } else if (msg.type === "error") {
-              throw new Error(msg.message);
-            }
-          } catch { /* linha incompleta */ }
+            msg = JSON.parse(line);
+          } catch {
+            continue; // linha incompleta, aguarda o resto do chunk
+          }
+          if (msg.type === "step") {
+            setProcessingStep(msg.step as ProcessingStep);
+          } else if (msg.type === "done") {
+            setJob(msg.job as Job);
+            setScreen("editor");
+            return;
+          } else if (msg.type === "error") {
+            throw new Error(msg.message);
+          }
         }
       }
     } catch (err) {

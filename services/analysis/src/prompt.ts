@@ -284,7 +284,7 @@ Voce tem acesso a 12 tipos. Escolha livremente, repita se fizer sentido, na quan
   Use quando o mentor comparar 3+ categorias/ativos/modalidades com valores numericos.
   Para 2 valores, prefira ComparativoNumerico. Para 3+, prefira GraficoBarra.
   - titulo: titulo do grafico (ex: "Rendimento por modalidade")
-  - pontos: array de {label, valor, destaque?} - label e a categoria, valor e numerico, destaque=true na barra principal
+  - barras: array de {rotulo, valor, eh_destaque?} - rotulo e a categoria, valor e numerico, eh_destaque=true na barra principal
   - unidade: unidade (ex: "%", "R$ mil")
   - cor_primaria: opcional
   - cor_secundaria: opcional

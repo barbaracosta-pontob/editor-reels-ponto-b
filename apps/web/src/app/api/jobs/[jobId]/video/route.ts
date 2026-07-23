@@ -9,7 +9,9 @@ import { createReadStream, statSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
 const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = path.join(REPO_ROOT, "jobs");
+const JOBS_DIR = process.env.JOBS_DIR
+  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
+  : path.join(REPO_ROOT, "jobs");
 
 export async function GET(
   req: NextRequest,
@@ -63,7 +65,13 @@ export async function GET(
   const chunkSize = endByte - startByte + 1;
   const nodeStream = createReadStream(videoPath, { start: startByte, end: endByte });
 
-  // Converte para Web ReadableStream tratando erro de cliente desconectado
+  // Converte para Web ReadableStream tratando erro de cliente desconectado.
+  // Respeita backpressure: pausa a leitura do arquivo quando o controller
+  // ja tem chunk suficiente enfileirado, e retoma no pull(). Sem isso, 2+
+  // videos grandes sendo servidos ao mesmo tempo (2 instancias, por ex.)
+  // enchem a fila mais rapido do que o navegador consegue consumir, o
+  // stream quebra no meio e o <video> reporta MEDIA_ELEMENT_ERROR (Code 4)
+  // como se o arquivo estivesse corrompido.
   const webStream = new ReadableStream({
     start(controller) {
       nodeStream.on("data", (chunk) => {
@@ -72,6 +80,10 @@ export async function GET(
         } catch {
           // Cliente fechou a conexão — destrói o stream Node silenciosamente
           nodeStream.destroy();
+          return;
+        }
+        if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+          nodeStream.pause();
         }
       });
       nodeStream.on("end", () => {
@@ -80,6 +92,9 @@ export async function GET(
       nodeStream.on("error", (err) => {
         try { controller.error(err); } catch { /* já fechado */ }
       });
+    },
+    pull() {
+      nodeStream.resume();
     },
     cancel() {
       nodeStream.destroy();

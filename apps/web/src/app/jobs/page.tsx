@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { ArrowRight } from "lucide-react";
 import { AppNav } from "@/components/AppNav";
 import styles from "./page.module.css";
 
@@ -60,7 +61,7 @@ export default function JobsPage() {
                 <span className={styles.badge}>✓ Renderizado</span>
               )}
               <Link href={`/jobs/${job.id}`} className={styles.btnEditor}>
-                Abrir editor →
+                Abrir editor <ArrowRight size={16} strokeWidth={2.5} />
               </Link>
             </div>
           </div>

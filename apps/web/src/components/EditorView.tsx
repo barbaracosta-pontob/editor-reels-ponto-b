@@ -242,40 +242,43 @@ export function EditorView({ job, onNew }: EditorViewProps) {
         for (const event of events) {
           const line = event.replace(/^data:\s*/m, "").trim();
           if (!line) continue;
+          let msg;
           try {
-            const msg = JSON.parse(line);
-            if (msg.type === "format_start") {
-              setRenderFormatLabel(msg.label);
-              setRenderPhase("bundling");
-              setRenderProgress(null);
-              setRenderLastSeenAt(Date.now());
-            } else if (msg.type === "phase") {
-              setRenderPhase(msg.phase as RenderPhase);
-              setRenderLastSeenAt(Date.now());
-              // Ao entrar em encoding, zera o progresso de frames pra UI nao mostrar
-              // "1800/1800 frames" travado enquanto FFmpeg roda. Se vier Encoded X/Y,
-              // o proximo evento de progress vai atualizar.
-              if (msg.phase === "encoding") {
-                setRenderProgress((prev) => prev ? { ...prev, frames: 0, total: 0, eta: "", phase: "encoding" } : null);
-              }
-            } else if (msg.type === "progress") {
-              setRenderProgress({ frames: msg.frames, total: msg.total, eta: msg.eta, phase: msg.phase as RenderPhase | undefined });
-              if (msg.phase) setRenderPhase(msg.phase as RenderPhase);
-              setRenderLastSeenAt(Date.now());
-            } else if (msg.type === "heartbeat") {
-              if (msg.phase) setRenderPhase(msg.phase as RenderPhase);
-              setRenderLastSeenAt(Date.now());
-            } else if (msg.type === "format_done") {
-              setRenderProgress(null);
-              setRenderPhase("bundling");
-            } else if (msg.type === "done") {
-              setOutputs(msg.outputs ?? { reels: msg.outputPath });
-              setRendering(false);
-              return;
-            } else if (msg.type === "error") {
-              throw new Error(msg.message);
+            msg = JSON.parse(line);
+          } catch {
+            continue; // linha incompleta, aguarda o resto do chunk
+          }
+          if (msg.type === "format_start") {
+            setRenderFormatLabel(msg.label);
+            setRenderPhase("bundling");
+            setRenderProgress(null);
+            setRenderLastSeenAt(Date.now());
+          } else if (msg.type === "phase") {
+            setRenderPhase(msg.phase as RenderPhase);
+            setRenderLastSeenAt(Date.now());
+            // Ao entrar em encoding, zera o progresso de frames pra UI nao mostrar
+            // "1800/1800 frames" travado enquanto FFmpeg roda. Se vier Encoded X/Y,
+            // o proximo evento de progress vai atualizar.
+            if (msg.phase === "encoding") {
+              setRenderProgress((prev) => prev ? { ...prev, frames: 0, total: 0, eta: "", phase: "encoding" } : null);
             }
-          } catch { /* linha incompleta */ }
+          } else if (msg.type === "progress") {
+            setRenderProgress({ frames: msg.frames, total: msg.total, eta: msg.eta, phase: msg.phase as RenderPhase | undefined });
+            if (msg.phase) setRenderPhase(msg.phase as RenderPhase);
+            setRenderLastSeenAt(Date.now());
+          } else if (msg.type === "heartbeat") {
+            if (msg.phase) setRenderPhase(msg.phase as RenderPhase);
+            setRenderLastSeenAt(Date.now());
+          } else if (msg.type === "format_done") {
+            setRenderProgress(null);
+            setRenderPhase("bundling");
+          } else if (msg.type === "done") {
+            setOutputs(msg.outputs ?? { reels: msg.outputPath });
+            setRendering(false);
+            return;
+          } else if (msg.type === "error") {
+            throw new Error(msg.message);
+          }
         }
       }
     } catch (err) {
