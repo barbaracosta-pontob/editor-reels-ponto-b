@@ -80,6 +80,7 @@ async function main() {
   if (n > 1) {
     env.PORT = String(port);
     env.JOBS_DIR = `./jobs-instance${n}`;
+    env.NEXT_DIST_DIR = `.next-instance${n}`;
   }
 
   let child;

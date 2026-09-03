@@ -11,6 +11,7 @@ require("dotenv").config({ path: path.resolve(__dirname, "../../.env"), override
 
 const nextConfig = {
   transpilePackages: ["@pontob/schema", "@remotion/player", "remotion"],
+  distDir: process.env.NEXT_DIST_DIR || ".next",
 
   webpack(config) {
     // Garante que @pontob/schema resolve para o pacote do monorepo,

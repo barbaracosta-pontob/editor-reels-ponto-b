@@ -35,7 +35,12 @@
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
-    ".next/types/**/*.ts"
+    ".next/types/**/*.ts",
+    ".next-instance2/types/**/*.ts",
+    ".next-instance3/types/**/*.ts",
+    ".next-instance4/types/**/*.ts",
+    ".next-instance5/types/**/*.ts",
+    ".next-instance8/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

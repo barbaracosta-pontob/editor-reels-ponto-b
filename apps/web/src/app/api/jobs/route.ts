@@ -13,9 +13,11 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-import { analyze } from "../../../services/analysis-bridge";
+import { analyze, planejarInserts } from "../../../services/analysis-bridge";
+import { buscarInserts } from "../../../services/inserts";
 import { getEspecialistaOrGenerico } from "../../../lib/db";
 import { getVideoDuration } from "../../../lib/video-duration";
+import { LegendaConfigSchema, transcriptToLegendaPalavras, type LegendaConfig, AulaConfigSchema } from "@pontob/schema";
 
 const execFileAsync = promisify(execFile);
 
@@ -49,6 +51,21 @@ export async function POST(req: NextRequest) {
         const videoFile = form.get("video") as File | null;
         const brief = (form.get("brief") as string) ?? "";
         const especialistaSlug = (form.get("especialista_slug") as string) ?? "generico";
+        // Formato de edição escolhido na tela inicial (default: cenas).
+        const formatoRaw = (form.get("formato") as string) ?? "cenas";
+        const formato = ["tela_dividida", "aula", "narrado"].includes(formatoRaw) ? formatoRaw : "cenas";
+
+        // Configuração de legenda contínua (opcional). Vem como JSON no form.
+        const legendaRaw = (form.get("legenda") as string) ?? "";
+        let legendaConfig: LegendaConfig | undefined;
+        if (legendaRaw) {
+          try {
+            const parsed = LegendaConfigSchema.parse(JSON.parse(legendaRaw));
+            if (parsed.ativa) legendaConfig = parsed;
+          } catch (e) {
+            console.warn("[POST /api/jobs] config de legenda inválida, ignorando:", e);
+          }
+        }
 
         if (!videoFile) {
           emit({ type: "error", message: "Video nao enviado" });
@@ -130,12 +147,129 @@ export async function POST(req: NextRequest) {
         // do conteudo do video (resultando em tela preta/congelada no final).
         const videoDuration = await getVideoDuration(videoPath);
 
+        // CTA final (encerramento). Copy puxada do especialista.
+        // Regra (decisão do Artur 2026-08-07): no formato AULA o CTA é padrão do
+        // formato (aula termina em chamada pro evento) — nasce SEMPRE ligado; sem
+        // copy do especialista, entra um placeholder editável no editor (nunca fica
+        // só a seta). Nos outros formatos, liga só quando há copy (senão fica
+        // desligado e o usuário liga no editor). Duração se ajusta no editor.
+        const ctaCopy = ((rawEspecialista.cta_palavra || rawEspecialista.cta_texto_secundario || "") as string).trim();
+        const ctaAula = formato === "aula";
+        const ctaFinal = {
+          ativo: ctaAula || ctaCopy.length > 0,
+          copy: ctaCopy || (ctaAula ? "Garanta sua vaga" : ""),
+          duracao_segundos: 4,
+        };
+        const ctaDur = ctaFinal.ativo ? ctaFinal.duracao_segundos : 0;
+
+        // --- FORMATOS COM INSERTS (tela dividida / narrado): plano + Pexels ---
+        if (formato === "tela_dividida" || formato === "narrado") {
+          const plano = await planejarInserts({
+            transcript,
+            videoDuration: videoDuration ?? undefined,
+            brief: briefFinal,
+          });
+          const inserts = await buscarInserts(jobDir, jobId, plano.inserts);
+
+          const videoEndInserts = videoDuration != null
+            ? Math.round(videoDuration * 10) / 10
+            : (inserts.length ? inserts[inserts.length - 1].fim : 0);
+
+          const configFormato = formato === "tela_dividida"
+            ? { tela_dividida: { especialista_posicao: "inicio", split_pct: 55, inserts } }
+            : { narrado: { inserts } };
+
+          const scenesInserts = {
+            duracao_total_estimada: videoEndInserts + ctaDur,
+            video_original_path: videoPath,
+            video_start_segundos: 0,
+            video_end_segundos: videoEndInserts,
+            cenas: [],
+            cta_final: ctaFinal,
+            cor_primaria: rawEspecialista.cor_primaria || undefined,
+            cor_secundaria: rawEspecialista.cor_secundaria || undefined,
+            fonte_url: rawEspecialista.fonte_url || undefined,
+            fonte_familia: rawEspecialista.fonte_familia || undefined,
+            especialista_slug: especialistaSlug,
+            formato,
+            ...configFormato,
+            legenda: legendaConfig ?? LegendaConfigSchema.parse({}),
+            legenda_palavras: transcriptToLegendaPalavras(transcript),
+          };
+
+          const scenesPathInserts = path.join(jobDir, "scenes.json");
+          await writeFile(scenesPathInserts, JSON.stringify(scenesInserts, null, 2), "utf-8");
+
+          emit({
+            type: "done",
+            job: {
+              id: jobId,
+              fileName: videoFile.name,
+              videoPath,
+              transcriptPath,
+              scenesPath: scenesPathInserts,
+              status: "ready",
+              scenes: scenesInserts,
+              outputPath: null,
+              error: null,
+              createdAt: new Date().toISOString(),
+              especialista_slug: especialistaSlug,
+            },
+          });
+          return;
+        }
+
+        // --- FORMATO AULA: layout (recorte do slide + especialista), sem LLM ---
+        if (formato === "aula") {
+          const videoEndAula = videoDuration != null ? Math.round(videoDuration * 10) / 10 : 0;
+          // CTA usa gradiente da identidade da marca (cor primária), não foto de fundo.
+          const scenesAula = {
+            duracao_total_estimada: videoEndAula + ctaDur,
+            video_original_path: videoPath,
+            video_start_segundos: 0,
+            video_end_segundos: videoEndAula,
+            cenas: [],
+            cta_final: ctaFinal,
+            cor_primaria: rawEspecialista.cor_primaria || undefined,
+            cor_secundaria: rawEspecialista.cor_secundaria || undefined,
+            fonte_url: rawEspecialista.fonte_url || undefined,
+            fonte_familia: rawEspecialista.fonte_familia || undefined,
+            especialista_slug: especialistaSlug,
+            formato: "aula",
+            aula: AulaConfigSchema.parse({}),
+            legenda: legendaConfig ?? LegendaConfigSchema.parse({}),
+            legenda_palavras: transcriptToLegendaPalavras(transcript),
+          };
+          const scenesPathAula = path.join(jobDir, "scenes.json");
+          await writeFile(scenesPathAula, JSON.stringify(scenesAula, null, 2), "utf-8");
+          emit({
+            type: "done",
+            job: {
+              id: jobId,
+              fileName: videoFile.name,
+              videoPath,
+              transcriptPath,
+              scenesPath: scenesPathAula,
+              status: "ready",
+              scenes: scenesAula,
+              outputPath: null,
+              error: null,
+              createdAt: new Date().toISOString(),
+              especialista_slug: especialistaSlug,
+            },
+          });
+          return;
+        }
+
         const result = await analyze({
           transcript,
           videoOriginalPath: videoPath,
           videoDuration: videoDuration ?? undefined,
           especialista,
           brief: briefFinal,
+          // Modo legenda: quando o usuário escolheu legenda, o agente monta a
+          // edição com VideoSimples como base e cenas gráficas só nos picos.
+          legenda: !!legendaConfig?.ativa,
         });
 
         // Calcula video_end_segundos respeitando o teto fisico do arquivo.
@@ -162,6 +296,11 @@ export async function POST(req: NextRequest) {
           fonte_url: rawEspecialista.fonte_url || undefined,
           fonte_familia: rawEspecialista.fonte_familia || undefined,
           especialista_slug: especialistaSlug,
+          // Legenda contínua: sempre grava as palavras (do transcript) para permitir
+          // ligar/editar a legenda depois no editor, mesmo que o job comece sem legenda.
+          // `legenda.ativa` reflete a escolha da tela inicial (default: desligada).
+          legenda: legendaConfig ?? LegendaConfigSchema.parse({}),
+          legenda_palavras: transcriptToLegendaPalavras(transcript),
         };
 
         const scenesPath = path.join(jobDir, "scenes.json");

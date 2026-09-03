@@ -1,20 +1,34 @@
 /**
  * POST /api/jobs/[jobId]/render
  *
- * Responde com Server-Sent Events (SSE) para que o cliente receba
- * progresso em tempo real durante a renderização do Remotion.
+ * Dispara o render EM BACKGROUND e responde imediatamente (202).
+ * O progresso NAO viaja mais pela conexao HTTP: e gravado em
+ * jobs/<id>/render-status.json e lido pela UI via GET .../render/status.
  *
- * Eventos emitidos:
- *   data: {"type":"progress","frames":450,"total":1590,"eta":"2m 30s"}
- *   data: {"type":"done","outputPath":"..."}
- *   data: {"type":"error","message":"..."}
+ * POR QUE MUDOU (2026-09-03)
+ * --------------------------
+ * A versao anterior devolvia SSE e o cliente lia o stream com um
+ * `while(true) { reader.read() }`. Quando a aba entrava em Back-Forward Cache
+ * o Chrome congelava o stream: o read nunca mais resolvia e nunca rejeitava,
+ * deixando a tela "Renderizando" travada num frame X/Y para sempre - enquanto
+ * o Remotion terminava normalmente e escrevia o mp4. Sem estado em disco nao
+ * havia como reconectar nem descobrir que tinha acabado.
+ *
+ * Agora o ciclo de vida do render nao depende mais do navegador.
  */
 
 import { NextRequest } from "next/server";
 import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import path from "node:path";
+import {
+  readStatus,
+  writeStatus,
+  processoVivo,
+  type RenderPhase,
+  type RenderStatus,
+} from "@/lib/renderStatus";
 
 const REPO_ROOT = path.resolve(process.cwd(), "../..");
 const JOBS_DIR = process.env.JOBS_DIR
@@ -25,20 +39,14 @@ const REMOTION_DIR = path.join(REPO_ROOT, "apps/remotion");
 // Remotion passa por 3 fases distintas durante o render. Cada uma emite
 // padroes de log diferentes:
 //
-//   1. Bundling     — "Bundled" / "Bundling" / "(1/3) Bundling code"
-//   2. Rendering    — "Rendered X/Y" — frame-by-frame via Chromium
-//   3. Encoding     — "Encoded X/Y" / "Stitching" / "Combining" — FFmpeg junta tudo
-//
-// O parser antigo so capturava (2). Quando o Remotion passava para (3) ele
-// parava de emitir "Rendered" e a UI congelava em "Y/Y frames" — mesmo
-// com o servidor ainda trabalhando no encoding.
+//   1. Bundling     - "Bundled" / "Bundling" / "(1/3) Bundling code"
+//   2. Rendering    - "Rendered X/Y" - frame-by-frame via Chromium
+//   3. Encoding     - "Encoded X/Y" / "Stitching" / "Combining" - FFmpeg junta tudo
 
 const FRAME_RE = /Rendered\s+(\d+)\/(\d+)/i;
 const ENCODED_RE = /Encoded\s+(\d+)\/(\d+)/i;
 const ETA_RE = /(\d+h\s*)?(\d+m\s*)?(\d+s)\s+remaining/i;
 
-// Marcadores de transicao de fase (case-insensitive). Detectados via includes
-// em vez de regex completa porque o Remotion pode formatar de varias formas.
 const PHASE_MARKERS: Array<{ pattern: RegExp; phase: RenderPhase }> = [
   { pattern: /\bbundl(ed|ing)\b/i,                          phase: "bundling" },
   { pattern: /Composition information loaded/i,              phase: "bundling" },
@@ -47,8 +55,6 @@ const PHASE_MARKERS: Array<{ pattern: RegExp; phase: RenderPhase }> = [
   { pattern: /\b(Encoding|Combining|Muxing)\b/i,             phase: "encoding" },
   { pattern: /\bFinaliz(ing|ed)\b/i,                         phase: "encoding" },
 ];
-
-type RenderPhase = "bundling" | "rendering" | "encoding";
 
 function stripAnsi(str: string): string {
   // eslint-disable-next-line no-control-regex
@@ -63,8 +69,8 @@ function resolveRemotionBin(): string {
   return existsSync(local) ? local : existsSync(root) ? root : `remotion${ext}`;
 }
 
-// Prefixos de assets estáticos que devem ser convertidos para URL HTTP absoluta
-// para que o Remotion possa buscá-los via rede durante o render (sem staticFile).
+// Prefixos de assets estaticos que devem ser convertidos para URL HTTP absoluta
+// para que o Remotion possa busca-los via rede durante o render (sem staticFile).
 const STATIC_ASSET_PREFIXES = ["sfx/", "musica/", "ambient/"];
 
 function isStaticAssetPath(val: unknown): val is string {
@@ -80,12 +86,21 @@ function substituirVideoPaths(obj: unknown, videoUrl: string, baseUrl: string): 
       Object.entries(obj as Record<string, unknown>).map(([k, v]) => {
         if (k === "video_path" || k === "video_original_path") return [k, videoUrl];
         // Converte sfx.path e musica_fundo.path relativos para URL HTTP absoluta.
-        // O Remotion proíbe staticFile() com URLs — assets devem ser servidos via HTTP.
+        // O Remotion proibe staticFile() com URLs - assets devem ser servidos via HTTP.
         if (k === "path" && isStaticAssetPath(v)) {
           return [k, `${baseUrl}/${(v as string).replace(/^\//, "")}`];
         }
         // Converte logo_url relativa para absoluta
         if (k === "logo_url" && typeof v === "string" && v.startsWith("/")) {
+          return [k, `${baseUrl}${v}`];
+        }
+        // Converte image_url de insert (tela dividida) relativa para absoluta.
+        if (k === "image_url" && typeof v === "string" && v.startsWith("/")) {
+          return [k, `${baseUrl}${v}`];
+        }
+        // Converte video_url de insert (b-roll de video) relativa para absoluta.
+        // Sem isso, o Remotion nao busca os mp4 dos inserts no render (falha).
+        if (k === "video_url" && typeof v === "string" && v.startsWith("/")) {
           return [k, `${baseUrl}${v}`];
         }
         return [k, substituirVideoPaths(v, videoUrl, baseUrl)];
@@ -96,11 +111,10 @@ function substituirVideoPaths(obj: unknown, videoUrl: string, baseUrl: string): 
 }
 
 // IMPORTANTE: o nome do arquivo de saida usa direto a formatKey
-// (`reel_${formatKey}.mp4`) — sem campo `suffix` intermediario.
+// (`reel_${formatKey}.mp4`) - sem campo `suffix` intermediario.
 // Versao antiga tinha suffix="reel" para a key "reels", gerando
 // `reel_reel.mp4` em disco enquanto o download tentava buscar
-// `reel_reels.mp4` (HTTP 404). Eliminamos o intermediario para garantir
-// que render e download sempre concordem sobre o nome do arquivo.
+// `reel_reels.mp4` (HTTP 404).
 const FORMAT_CONFIG = {
   reels:  { compositionId: "Reel",       label: "9:16 Reels" },
   wide:   { compositionId: "ReelWide",   label: "16:9 Wide" },
@@ -108,6 +122,205 @@ const FORMAT_CONFIG = {
 } as const;
 
 type FormatKey = keyof typeof FORMAT_CONFIG;
+
+// Guarda em memoria dos renders disparados por ESTE processo. Serve pra evitar
+// dois renders concorrentes do mesmo job. Nao e a fonte da verdade - o
+// render-status.json em disco e, justamente porque sobrevive a hot-reload.
+const emAndamento = new Set<string>();
+
+/**
+ * Roda os formatos em sequencia, atualizando o render-status.json.
+ * NAO recebe o controller de nenhuma response: a request que disparou isso
+ * ja terminou ha muito tempo.
+ */
+async function executarRender(
+  jobId: string,
+  jobDir: string,
+  propsPath: string,
+  outputDir: string,
+  formatos: FormatKey[],
+): Promise<void> {
+  const bin = resolveRemotionBin();
+  const isWin = process.platform === "win32";
+  const startedAt = Date.now();
+  const outputs: Record<string, string> = {};
+
+  // Estado local; cada mutacao e persistida por `flush()`.
+  const status: RenderStatus = {
+    status: "running",
+    formatos,
+    phase: "bundling",
+    frames: 0,
+    total: 0,
+    eta: "",
+    outputs,
+    startedAt,
+    updatedAt: startedAt,
+  };
+
+  // Throttle: o Remotion emite "Rendered X/Y" varias vezes por segundo. Escrever
+  // o arquivo a cada linha faria centenas de writes/s no disco a toa. 400ms e
+  // bem mais rapido que o intervalo de polling da UI (1s), entao nada e perdido.
+  let ultimoFlush = 0;
+  async function flush(force = false) {
+    const agora = Date.now();
+    if (!force && agora - ultimoFlush < 400) return;
+    ultimoFlush = agora;
+    status.updatedAt = agora;
+    try {
+      await writeStatus(jobDir, status);
+    } catch {
+      // Disco ocupado; o proximo flush resolve.
+    }
+  }
+
+  await flush(true);
+
+  try {
+    for (const formatKey of formatos) {
+      const fmt = FORMAT_CONFIG[formatKey];
+      const outputPath = path.join(outputDir, `reel_${formatKey}.mp4`);
+
+      status.format = formatKey;
+      status.formatLabel = fmt.label;
+      status.phase = "bundling";
+      status.frames = 0;
+      status.total = 0;
+      status.eta = "";
+      await flush(true);
+
+      // Log completo vai para arquivo, NAO para o stdout do Next dev.
+      // No Windows, `process.stdout.write` e sincrono: ecoar o log verbose do
+      // Remotion linha a linha bloqueava o event loop do mesmo processo que
+      // estava servindo os mp4 dos inserts para o proprio render. Era parte do
+      // motivo de um reel de 41s levar ~1h e do dev server devolver 500 no meio.
+      const logStream = createWriteStream(path.join(jobDir, `render-${formatKey}.log`), { flags: "w" });
+
+      const exitCode = await new Promise<number>((resolve) => {
+        let currentPhase: RenderPhase = "bundling";
+        let lastEncodedFrames = 0;
+        let lastEncodedTotal = 0;
+
+        // Margem de tempo maior: com b-roll de video, cada frame pode demorar
+        // mais para o OffthreadVideo baixar os mp4 dos inserts.
+        // Opcional: apontar um Chrome instalado via REMOTION_BROWSER_EXECUTABLE
+        // quando o chrome-headless-shell falha em conectar.
+        //
+        // `--log=info` (nao mais `verbose`): "Rendered X/Y", "Encoded X/Y" e os
+        // marcadores de fase continuam saindo em info. O verbose so acrescentava
+        // ruido de rede/browser - dezenas de MB de log por render.
+        const extraArgs: string[] = ["--timeout=120000", "--log=info"];
+        if (process.env.REMOTION_BROWSER_EXECUTABLE) {
+          extraArgs.push(`--browser-executable=${process.env.REMOTION_BROWSER_EXECUTABLE}`);
+        }
+
+        const child = spawn(bin, [
+          "render",
+          fmt.compositionId,
+          outputPath,
+          `--props=${propsPath}`,
+          ...extraArgs,
+        ], {
+          cwd: REMOTION_DIR,
+          shell: isWin,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        status.pid = child.pid ?? undefined;
+        void flush(true);
+
+        function processChunk(chunk: Buffer) {
+          const raw = chunk.toString();
+          logStream.write(raw);
+          const text = stripAnsi(raw);
+
+          // Detecta transicao de fase. Avanca so para frente para nao oscilar.
+          for (const marker of PHASE_MARKERS) {
+            if (marker.pattern.test(text)) {
+              const order: RenderPhase[] = ["bundling", "rendering", "encoding"];
+              if (order.indexOf(marker.phase) > order.indexOf(currentPhase)) {
+                currentPhase = marker.phase;
+                status.phase = currentPhase;
+                // Ao entrar em encoding zera os contadores de frame pra UI nao
+                // mostrar "1239/1239" parado enquanto o FFmpeg roda.
+                if (currentPhase === "encoding") {
+                  status.frames = 0;
+                  status.total = 0;
+                  status.eta = "";
+                }
+              }
+            }
+          }
+
+          const frameMatch = text.match(FRAME_RE);
+          if (frameMatch) {
+            status.frames = parseInt(frameMatch[1], 10);
+            status.total = parseInt(frameMatch[2], 10);
+            if (currentPhase === "bundling") {
+              currentPhase = "rendering";
+              status.phase = currentPhase;
+            }
+          }
+
+          const encodedMatch = text.match(ENCODED_RE);
+          if (encodedMatch) {
+            lastEncodedFrames = parseInt(encodedMatch[1], 10);
+            lastEncodedTotal = parseInt(encodedMatch[2], 10);
+            if (currentPhase !== "encoding") {
+              currentPhase = "encoding";
+              status.phase = currentPhase;
+            }
+            status.frames = lastEncodedFrames;
+            status.total = lastEncodedTotal;
+          }
+
+          const etaMatch = text.match(ETA_RE);
+          if (etaMatch) {
+            status.eta = etaMatch[0].replace(/\s*remaining/i, "").trim();
+          }
+
+          void flush();
+        }
+
+        child.stdout?.on("data", processChunk);
+        child.stderr?.on("data", processChunk);
+
+        child.on("close", (code) => {
+          logStream.end();
+          resolve(code ?? 1);
+        });
+        child.on("error", (err) => {
+          logStream.write(`\n[spawn error] ${String(err)}\n`);
+          logStream.end();
+          status.error = String(err);
+          resolve(1);
+        });
+      });
+
+      if (exitCode !== 0) {
+        status.status = "error";
+        status.error = status.error
+          ?? `Falha ao renderizar formato ${fmt.label} (codigo ${exitCode}). Log: jobs/${jobId}/render-${formatKey}.log`;
+        await flush(true);
+        return;
+      }
+
+      outputs[formatKey] = outputPath;
+      status.outputs = outputs;
+      await flush(true);
+    }
+
+    status.status = "done";
+    status.pid = undefined;
+    await flush(true);
+  } catch (err) {
+    status.status = "error";
+    status.error = String(err);
+    await flush(true);
+  } finally {
+    emAndamento.delete(jobId);
+  }
+}
 
 export async function POST(
   req: NextRequest,
@@ -118,10 +331,18 @@ export async function POST(
   const scenesPath = path.join(jobDir, "scenes.json");
 
   if (!existsSync(scenesPath)) {
-    return new Response(JSON.stringify({ error: "Job não encontrado" }), { status: 404 });
+    return Response.json({ error: "Job nao encontrado" }, { status: 404 });
   }
 
-  // Formatos selecionados pelo usuário (default: apenas reels)
+  // Ja existe um render vivo pra esse job? Nao dispara outro - a UI so precisa
+  // comecar a fazer polling. Isso tambem cobre o caso de o usuario dar F5 na
+  // tela de render e clicar em exportar de novo.
+  const anterior = await readStatus(jobDir);
+  if (emAndamento.has(jobId) || (anterior?.status === "running" && processoVivo(anterior.pid))) {
+    return Response.json({ ok: true, jaRodando: true }, { status: 202 });
+  }
+
+  // Formatos selecionados pelo usuario (default: apenas reels)
   let formatos: FormatKey[] = ["reels"];
   try {
     const body = await req.json();
@@ -131,9 +352,9 @@ export async function POST(
     }
   } catch { /* body vazio */ }
 
-  // Prepara props antes de abrir o stream
-  let propsPath: string;
+  // Prepara props antes de disparar o processo
   const outputDir = path.join(jobDir, "out");
+  let propsPath: string;
   try {
     const scenes = JSON.parse(await readFile(scenesPath, "utf-8"));
     const host = req.headers.get("host") ?? "localhost:3001";
@@ -146,172 +367,32 @@ export async function POST(
 
     await mkdir(outputDir, { recursive: true });
   } catch (err) {
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
+    return Response.json({ error: String(err) }, { status: 500 });
   }
 
-  // SSE stream — itera sobre cada formato selecionado sequencialmente
-  const encoder = new TextEncoder();
+  emAndamento.add(jobId);
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      function send(data: object) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-      }
-
-      const bin = resolveRemotionBin();
-      const isWin = process.platform === "win32";
-      const outputs: Record<string, string> = {};
-
-      for (const formatKey of formatos) {
-        const fmt = FORMAT_CONFIG[formatKey];
-        const outputPath = path.join(outputDir, `reel_${formatKey}.mp4`);
-        outputs[formatKey] = outputPath;
-
-        send({ type: "format_start", format: formatKey, label: fmt.label });
-
-        const exitCode = await new Promise<number>((resolve) => {
-          const lines: string[] = [];
-          let lastFrames = 0;
-          let lastTotal = 0;
-          let lastEta = "";
-          let currentPhase: RenderPhase = "bundling";
-          let lastEncodedFrames = 0;
-          let lastEncodedTotal = 0;
-
-          // Heartbeat: durante o encoding o Remotion pode ficar 30-60s sem emitir
-          // linha nova. Manda um sinal "ainda vivo" a cada 2s pra UI nao parecer
-          // congelada — mesmo sem progresso numerico.
-          const heartbeat = setInterval(() => {
-            send({
-              type: "heartbeat",
-              format: formatKey,
-              phase: currentPhase,
-            });
-          }, 2000);
-
-          const child = spawn(bin, [
-            "render",
-            fmt.compositionId,
-            outputPath,
-            `--props=${propsPath}`,
-            "--log=verbose",
-          ], {
-            cwd: REMOTION_DIR,
-            shell: isWin,
-            stdio: ["ignore", "pipe", "pipe"],
-          });
-
-          function processChunk(chunk: Buffer) {
-            const raw = chunk.toString();
-            const text = stripAnsi(raw);
-
-            // Detecta transicao de fase. Avanca so para frente (bundling -> rendering -> encoding)
-            // para nao oscilar quando o log mistura termos.
-            for (const marker of PHASE_MARKERS) {
-              if (marker.pattern.test(text)) {
-                const order: RenderPhase[] = ["bundling", "rendering", "encoding"];
-                const idxAtual = order.indexOf(currentPhase);
-                const idxNova = order.indexOf(marker.phase);
-                if (idxNova > idxAtual) {
-                  currentPhase = marker.phase;
-                  send({ type: "phase", format: formatKey, phase: currentPhase });
-                }
-              }
-            }
-
-            const frameMatch = text.match(FRAME_RE);
-            if (frameMatch) {
-              lastFrames = parseInt(frameMatch[1], 10);
-              lastTotal = parseInt(frameMatch[2], 10);
-              // "Rendered X/Y" so aparece na fase de rendering — confirma a fase
-              if (currentPhase === "bundling") {
-                currentPhase = "rendering";
-                send({ type: "phase", format: formatKey, phase: currentPhase });
-              }
-            }
-
-            const encodedMatch = text.match(ENCODED_RE);
-            if (encodedMatch) {
-              lastEncodedFrames = parseInt(encodedMatch[1], 10);
-              lastEncodedTotal = parseInt(encodedMatch[2], 10);
-              // "Encoded X/Y" indica fase de encoding
-              if (currentPhase !== "encoding") {
-                currentPhase = "encoding";
-                send({ type: "phase", format: formatKey, phase: currentPhase });
-              }
-            }
-
-            const etaMatch = text.match(ETA_RE);
-            if (etaMatch) {
-              lastEta = etaMatch[0].replace(/\s*remaining/i, "").trim();
-            }
-
-            if (currentPhase === "encoding" && lastEncodedTotal > 0) {
-              send({
-                type: "progress",
-                format: formatKey,
-                phase: "encoding",
-                frames: lastEncodedFrames,
-                total: lastEncodedTotal,
-                eta: lastEta,
-              });
-            } else if (lastTotal > 0) {
-              send({
-                type: "progress",
-                format: formatKey,
-                phase: currentPhase,
-                frames: lastFrames,
-                total: lastTotal,
-                eta: lastEta,
-              });
-            }
-          }
-
-          child.stdout?.on("data", (chunk: Buffer) => {
-            const raw = chunk.toString();
-            process.stdout.write(raw);
-            lines.push(raw);
-            processChunk(chunk);
-          });
-          child.stderr?.on("data", (chunk: Buffer) => {
-            const raw = chunk.toString();
-            process.stderr.write(raw);
-            lines.push(raw);
-            // Remotion costuma emitir progresso tambem em stderr quando o terminal nao e TTY.
-            processChunk(chunk);
-          });
-
-          child.on("close", (code) => {
-            clearInterval(heartbeat);
-            resolve(code ?? 1);
-          });
-          child.on("error", (err) => {
-            clearInterval(heartbeat);
-            send({ type: "error", message: String(err) });
-            resolve(1);
-          });
-        });
-
-        if (exitCode !== 0) {
-          send({ type: "error", message: `Falha ao renderizar formato ${fmt.label} (código ${exitCode})` });
-          controller.close();
-          return;
-        }
-
-        send({ type: "format_done", format: formatKey, label: fmt.label, outputPath });
-      }
-
-      // Todos os formatos concluídos
-      send({ type: "done", outputs, outputPath: outputs["reels"] ?? Object.values(outputs)[0] });
-      controller.close();
-    },
+  // Marca "running" ANTES de responder. Se o status so fosse escrito la dentro
+  // do executarRender, o primeiro poll da UI poderia chegar antes e ler o
+  // status "done" do render ANTERIOR - mostrando o video velho como se fosse o
+  // novo. Escrever aqui fecha essa janela.
+  const agora = Date.now();
+  await writeStatus(jobDir, {
+    status: "running",
+    formatos,
+    format: formatos[0],
+    formatLabel: FORMAT_CONFIG[formatos[0]].label,
+    phase: "bundling",
+    frames: 0,
+    total: 0,
+    eta: "",
+    outputs: {},
+    startedAt: agora,
+    updatedAt: agora,
   });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-    },
-  });
+  // Deliberadamente SEM await: a request responde agora, o render segue.
+  void executarRender(jobId, jobDir, propsPath, outputDir, formatos);
+
+  return Response.json({ ok: true, formatos }, { status: 202 });
 }

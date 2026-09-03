@@ -1,4 +1,11 @@
 import { z } from "zod";
+import { LegendaConfigSchema, LegendaPalavraSchema } from "./captions";
+import { FORMATOS, TelaDivididaConfigSchema, AulaConfigSchema, NarradoConfigSchema, CtaFinalSchema } from "./split";
+
+// Reexporta os módulos de legenda e de formatos (schemas, tipos e helpers puros)
+// para que consumidores importando "@pontob/schema" tenham tudo num ponto só.
+export * from "./captions";
+export * from "./split";
 
 export const WordHighlightSchema = z.object({
   palavra: z.string().min(1),
@@ -226,6 +233,18 @@ export const ReelPropsSchema = z
     fonte_url: z.string().optional(),
     fonte_familia: z.string().optional(),
     musica_fundo: MusicaFundoSchema.optional(),
+    // Legenda contínua (opcional). `legenda` = configuração escolhida no editor;
+    // `legenda_palavras` = timestamps palavra-a-palavra derivados do transcript.
+    // Quando ausente ou `ativa: false`, nenhuma legenda é renderizada.
+    legenda: LegendaConfigSchema.optional(),
+    legenda_palavras: z.array(LegendaPalavraSchema).optional(),
+    // Formato de edição do reel. "cenas" = timeline de cenas (padrão atual);
+    // "tela_dividida" = especialista numa metade + inserts do tema na outra.
+    formato: z.enum(FORMATOS).optional(),
+    tela_dividida: TelaDivididaConfigSchema.optional(),
+    aula: AulaConfigSchema.optional(),
+    narrado: NarradoConfigSchema.optional(),
+    cta_final: CtaFinalSchema.optional(),
   })
   .strict();
 

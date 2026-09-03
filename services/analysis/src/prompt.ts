@@ -635,6 +635,7 @@ export const buildUserPrompt = (params: {
     observacoes?: string;
   };
   brief?: string;
+  legenda?: boolean;
 }): string => {
   const partes: string[] = [];
 
@@ -644,6 +645,18 @@ export const buildUserPrompt = (params: {
   partes.push(JSON.stringify(params.especialista, null, 2));
   partes.push("</especialista>");
   partes.push("");
+
+  if (params.legenda) {
+    partes.push("MODO DE EDICAO: LEGENDA CONTINUA ATIVA.");
+    partes.push("Este reel tera legenda continua na tela — as palavras do mentor aparecem sincronizadas com a fala durante todo o video. Isso MUDA a estrutura da edicao. Siga estas regras com prioridade:");
+    partes.push("- A LEGENDA e a base do video. Os trechos de fala do mentor devem ser cobertos por VideoSimples (so o mentor falando, sem overlay), para a legenda aparecer por cima.");
+    partes.push("- Cenas com texto proprio (Hook, FraseImpacto, ComparativoNumerico, VideoCitacao, ListaPontos, MiniCaso, TransicaoTexto, ConviteEvento, GraficoLinha, GraficoBarra, CTA) ESCONDEM a legenda enquanto estao na tela. Por isso use-as com PARCIMONIA — apenas nos 2 a 4 momentos MAIS fortes do conteudo (um dado forte, uma frase de virada, o convite ao evento).");
+    partes.push("- Mantenha SEMPRE o Hook na abertura e o CTA no encerramento.");
+    partes.push("- Entre esses picos, o tempo deve ser preenchido com VideoSimples. A MAIORIA do timeline (bem mais da metade da duracao) precisa ser VideoSimples, senao a legenda nao aparece.");
+    partes.push("- Na duvida entre uma cena grafica e um VideoSimples, escolha VideoSimples.");
+    partes.push("- Nao empilhe cenas graficas em sequencia; separe-as com VideoSimples.");
+    partes.push("");
+  }
 
   const transcriptObj = params.transcript as Record<string, unknown>;
   const duracaoTotal: number | null =
@@ -730,5 +743,96 @@ export const buildUserPrompt = (params: {
   partes.push("- VideoCitacao deve terminar antes do ConviteEvento comecar (sem sobreposicao temporal)");
   partes.push("- NUNCA gere uma VideoCitacao separada so para a frase de convite ao evento (ex: 'vou te ensinar isso em [evento]'). O ConviteEvento que vem na sequencia ja cobre essa transicao. No maximo uma VideoCitacao antes do ConviteEvento, e apenas se ela cobrir o argumento central do video, nao o convite em si");
 
+  return partes.join("\n");
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLANO DE INSERTS — formato "Tela dividida"
+//
+// Aqui o Claude NÃO monta cenas. Ele lê a transcrição e divide o vídeo inteiro
+// em blocos de assunto contíguos; para cada bloco define UM insert (imagem do
+// tema) com um termo de busca de banco de stock. O motor de inserts busca as
+// imagens depois. Saída: JSON { "inserts": [ {inicio, fim, query, descricao} ] }.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const SYSTEM_PROMPT_INSERTS = `Voce e o assistente de edicao da Ponto B. Sua tarefa: dado a transcricao de um video de um especialista, planejar os INSERTS de um reel no formato "tela dividida" — metade da tela mostra o especialista, a outra metade mostra uma imagem do tema. As imagens mudam conforme o assunto.
+
+REGRAS:
+1. Divida a duracao INTEIRA do video em blocos CONTIGUOS. O primeiro bloco comeca em 0. O ultimo termina na duracao total. fim de um bloco = inicio do proximo (sem buracos, sem sobreposicao).
+2. ALINHE COM A FALA, NAO COM O RELOGIO. Troque de insert quando a COISA CONCRETA citada muda — siga o roteiro. Ancore o inicio/fim de cada bloco nos TIMESTAMPS REAIS das palavras (use a lista PALAVRAS abaixo): o insert entra no instante em que a coisa e dita e sai quando muda. A duracao e LIVRE — vem da fala, nao de um alvo fixo.
+   - ENUMERACOES: se o especialista lista varios itens concretos em sequencia (ex: "o professor, o medico, o engenheiro"), crie UM insert para CADA item, cada um comecando no timestamp da palavra correspondente — mesmo que cada um dure ~1s. NAO agrupe uma enumeracao num insert so.
+   - Um bloco pode ir de ~0.8s (item de enumeracao rapida) a ~8s (um assunto unico que se estende). So nao crie blocos abaixo de 0.8s.
+3. ABERTURA E CRITICA (primeiros ~3s = o gancho que decide se o anuncio performa). O PRIMEIRO insert comeca em 0.0 e deve ser o MAIS relevante e especifico possivel ao que e dito no gancho — NUNCA uma imagem generica de "abertura". Se o gancho ja cita algo concreto, mostre exatamente aquilo desde o frame 0; se for uma promessa/pergunta sobre o tema, mostre a cena concreta do tema. De atencao redobrada ao alinhamento dos primeiros 5s (blocos curtos e exatos, colados na fala).
+4. Para cada bloco escreva:
+   - "query": termo de busca em INGLES, ESPECIFICO e ancorado no que o especialista NOMEIA naquele trecho (a coisa concreta: o ativo, o lugar, a acao, o objeto, a pessoa, a instituicao), NAO o tema abstrato. Use 2-4 palavras que descrevam uma cena filmavel. Exemplos bons e especificos: "trading floor traders", "person analyzing stock chart laptop", "bank building facade", "hands counting brazilian real", "city financial district skyline", "nurse checking patient chart". EVITE termos genericos e batidos que devolvem sempre a mesma foto clichê: sozinhos "money", "success", "business", "growth", "finance" nao servem — se o assunto e dinheiro/mercado, escolha a CENA concreta por tras (o pregao, o grafico na tela, a moeda na mao, o predio do banco), nao a palavra "money". Nunca repita a mesma query em blocos diferentes: varie o angulo.
+   - "descricao": frase curta em PT explicando o que a imagem representa naquele bloco.
+   - "preferir_real": inclua true SOMENTE quando o bloco fala de algo REAL e nomeavel (uma pessoa publica, uma empresa/marca, um lugar especifico, um evento historico) que faz mais sentido mostrar de verdade do que como stock generico. Na maioria dos blocos, omita (false implicito).
+5. A query deve refletir o que o especialista esta FALANDO naquele intervalo (ancore nos timestamps das PALAVRAS).
+6. Nao invente conteudo que o especialista nao mencionou.
+7. DIRECIONAMENTO DE IMAGEM (quando houver, aparece abaixo com esse titulo): e ORIENTACAO do editor, NAO obrigacao. Pode vir de duas formas, misturadas: (a) REGRAS GERAIS de visual pro video todo (ex: "evitar foto generica de dinheiro; priorizar pregao e graficos reais; tom sobrio, nada de clichê") — trate como preferencia em TODOS os blocos; (b) CUES por trecho/frase (ex: "quando falar de renda passiva, mostrar carteira de investimentos"; "nos primeiros 5s, mostrar a bolsa") — ancore no momento correspondente pela lista de PALAVRAS. Siga o direcionamento SEMPRE que casar com o que e realmente dito e existir imagem plausivel; se um cue nao bater com a fala daquele trecho, ignore-o e siga a fala. Nada disso e obrigatorio: a fala e o alinhamento (regras 2 e 3) tem prioridade sobre o direcionamento.
+
+FORMATO DE SAIDA — retorne APENAS este JSON, sem markdown, sem comentarios:
+{
+  "inserts": [
+    { "inicio": 0, "fim": 5.5, "query": "trading floor traders screens", "descricao": "abertura falando do mercado" },
+    { "inicio": 5.5, "fim": 11, "query": "person analyzing stock chart laptop", "descricao": "..." }
+  ]
+}`;
+
+export const buildInsertPrompt = (params: {
+  transcript: object;
+  brief?: string;
+  permitirBuscaDados?: boolean;
+}): string => {
+  const partes: string[] = [];
+  const t = params.transcript as Record<string, unknown>;
+  const duracao = typeof t.duration === "number" ? t.duration : null;
+
+  partes.push("TRANSCRICAO DO VIDEO (PT-BR, com timestamps):");
+  partes.push("");
+  if (duracao !== null) {
+    partes.push(`DURACAO TOTAL: ${duracao.toFixed(1)}s. O ultimo insert deve terminar EXATAMENTE em ${duracao.toFixed(1)}.`);
+    partes.push("");
+  }
+
+  type Word = { word?: string; start?: number; end?: number };
+  type Seg = { start: number; end: number; text: string; words?: Word[] };
+  const segs = Array.isArray(t.segments) ? (t.segments as Seg[]) : [];
+  if (segs.length > 0) {
+    partes.push("SEGMENTOS (visao geral do assunto por trecho):");
+    for (const s of segs) {
+      partes.push(`  [${s.start.toFixed(2)}s -> ${s.end.toFixed(2)}s] ${s.text.trim()}`);
+    }
+    partes.push("");
+  }
+
+  // Timeline por PALAVRA — permite ancorar inserts no instante exato em que cada
+  // coisa e dita (essencial para enumeracoes e para acertar os primeiros segundos).
+  const palavras: Word[] = [];
+  for (const s of segs) {
+    if (Array.isArray(s.words)) {
+      for (const w of s.words) {
+        if (w && typeof w.start === "number" && (w.word ?? "").trim()) palavras.push(w);
+      }
+    }
+  }
+  if (palavras.length > 0) {
+    partes.push("PALAVRAS (timestamp de inicio de cada palavra — use para ancorar inicio/fim exatos dos inserts, sobretudo em enumeracoes e nos primeiros segundos):");
+    partes.push(palavras.map((w) => `${(w.start as number).toFixed(2)} ${(w.word ?? "").trim()}`).join("  "));
+    partes.push("");
+  }
+
+  if (params.brief && params.brief.trim()) {
+    partes.push("DIRECIONAMENTO DE IMAGEM (orientacao do editor — guia, NAO obrigatorio; ignore o que nao casar com a fala):");
+    partes.push(params.brief.trim());
+    partes.push("");
+  }
+
+  if (params.permitirBuscaDados) {
+    partes.push("DADO RECENTE (opcional, use a ferramenta de busca web): se algum bloco ganhar forca com um DADO/FATO/NUMERO atual e verificavel sobre o tema (uma estatistica, um indice, um marco recente), busque na web UM dado confiavel e atual e coloque-o em 'overlay_texto' desse bloco — curto e direto (ex: \"Ibovespa: +12% em 2025\"). Maximo 1-2 buscas no total. REGRAS DUras: so inclua overlay_texto se tiver CONFIRMADO o numero/fato na busca; NUNCA invente, estime ou chute numeros; se nao houver dado util, ou se voce nao tiver a ferramenta de busca, simplesmente NAO inclua overlay_texto. A grande maioria dos blocos NAO tera overlay — use com parcimonia, so onde o dado agrega de verdade.");
+    partes.push("");
+  }
+
+  partes.push("Planeje os inserts cobrindo o video inteiro, colados na fala, e retorne apenas o JSON.");
   return partes.join("\n");
 };

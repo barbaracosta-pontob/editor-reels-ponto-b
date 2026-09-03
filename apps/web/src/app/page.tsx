@@ -37,6 +37,8 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [brief, setBrief] = useState("");
   const [especialistaSlug, setEspecialistaSlug] = useState("generico");
+  const [formato, setFormato] = useState<"cenas" | "tela_dividida" | "aula" | "narrado">("cenas");
+  const [legendaOpcao, setLegendaOpcao] = useState<"nenhuma" | "palavra_unica" | "frase_limpa" | "dinamica">("nenhuma");
   const [especialistas, setEspecialistas] = useState<EspecialistaItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [processingStep, setProcessingStep] = useState<ProcessingStep>("transcribing");
@@ -68,6 +70,10 @@ export default function Home() {
     formData.append("video", file);
     formData.append("brief", brief);
     formData.append("especialista_slug", especialistaSlug);
+    formData.append("formato", formato);
+    if (legendaOpcao !== "nenhuma") {
+      formData.append("legenda", JSON.stringify({ ativa: true, estilo: legendaOpcao }));
+    }
     setProcessingStep("transcribing");
     setScreen("processing");
     try {
@@ -233,6 +239,48 @@ export default function Home() {
           </div>
           <div className={styles.fieldHint}>
             <Link href="/especialistas">Gerenciar especialistas →</Link>
+          </div>
+        </div>
+
+        {/* Formato de edição */}
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Formato</label>
+          <div className={styles.selectWrapper}>
+            <select
+              className={styles.select}
+              value={formato}
+              onChange={(e) => setFormato(e.target.value as typeof formato)}
+            >
+              <option value="cenas">Cenas (edição atual)</option>
+              <option value="tela_dividida">Tela dividida (especialista + inserts)</option>
+              <option value="aula">Aula (slide + especialista)</option>
+              <option value="narrado">Narrado (voz + inserts em tela cheia)</option>
+            </select>
+            <span className={styles.selectArrow}>▾</span>
+          </div>
+          <div className={styles.fieldHint}>
+            Tela dividida busca imagens do tema (Pexels). Aula usa a gravação com slide + câmera.
+          </div>
+        </div>
+
+        {/* Legenda contínua */}
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Legenda contínua</label>
+          <div className={styles.selectWrapper}>
+            <select
+              className={styles.select}
+              value={legendaOpcao}
+              onChange={(e) => setLegendaOpcao(e.target.value as typeof legendaOpcao)}
+            >
+              <option value="nenhuma">Sem legenda</option>
+              <option value="palavra_unica">Palavra única (elegante)</option>
+              <option value="frase_limpa">Frase limpa (contínua)</option>
+              <option value="dinamica">Dinâmica (palavra ativa)</option>
+            </select>
+            <span className={styles.selectArrow}>▾</span>
+          </div>
+          <div className={styles.fieldHint}>
+            Aparece nos trechos de vídeo e some nas cenas com texto próprio.
           </div>
         </div>
 

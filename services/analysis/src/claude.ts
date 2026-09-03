@@ -1,8 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ZodError } from "zod";
 
-import { ReelPropsSchema, type ReelProps } from "@pontob/schema";
-import { SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT, buildUserPrompt, buildRefinePrompt, PROMPT_VERSION } from "./prompt";
+import { ReelPropsSchema, type ReelProps, PlanoInsertsSchema, type InsertPlanoItem } from "@pontob/schema";
+import { SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT, buildUserPrompt, buildRefinePrompt, PROMPT_VERSION, SYSTEM_PROMPT_INSERTS, buildInsertPrompt } from "./prompt";
 
 const DEFAULT_MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6";
 // O prompt pede um bloco <analise>/<diagnostico> extenso (chain-of-thought) ANTES do JSON.
@@ -10,7 +10,11 @@ const DEFAULT_MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6";
 // e o JSON e truncado no meio (stop_reason "max_tokens") -> JSON.parse falha -> "JSON invalido".
 // Orcamento generoso + escalonamento por tentativa evitam o corte.
 const MAX_TOKENS = 16000;
-const MAX_TOKENS_REFINE = 16000; // refine escreve bloco <diagnostico> antes do JSON
+// Refine escreve um bloco <diagnostico> LONGO (chain-of-thought) antes do JSON.
+// Em vídeos longos isso truncava a resposta (stop_reason=max_tokens) nas 1as
+// tentativas, gastando-as à toa. Orçamento inicial maior evita o corte e deixa
+// o retry-com-feedback corrigir erros de schema de verdade. Escalona +8k/tentativa.
+const MAX_TOKENS_REFINE = 32000;
 
 export type AnalyzeParams = {
   transcript: object;
@@ -43,6 +47,12 @@ export type AnalyzeParams = {
     observacoes?: string;
   };
   brief?: string;
+  /**
+   * Quando true, a edicao sera em "modo legenda": o prompt orienta o agente a
+   * usar VideoSimples como base (para a legenda continua aparecer por cima) e
+   * cenas graficas apenas nos picos. Ver buildUserPrompt.
+   */
+  legenda?: boolean;
 };
 
 export type AnalyzeResult = {
@@ -332,6 +342,7 @@ export async function analyze(
     videoOriginalPath: params.videoOriginalPath,
     especialista: params.especialista,
     brief: params.brief,
+    legenda: params.legenda,
   });
 
   const tokensAcumulados = {
@@ -448,13 +459,138 @@ export async function analyze(
     }
 
     console.error(
-      `[analyze] tentativa ${tentativa}: schema invalido (${validation.error.errors.length} erros), retentando...`,
+      `[analyze] tentativa ${tentativa}: schema invalido (${validation.error.errors.length} erros): ` +
+      validation.error.errors.slice(0, 10).map((e) => `${e.path.join(".") || "(raiz)"}: ${e.message}`).join(" | "),
     );
     ultimoErroZod = validation.error;
   }
 
   throw new AnalysisError(
     `Falha apos 3 tentativas. Ultimo erro Zod: ${
+      ultimoErroZod?.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ") ?? "desconhecido"
+    }`,
+    3,
+    ultimaResposta,
+    ultimoErroZod,
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plano de inserts — formato "Tela dividida"
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type PlanejarInsertsParams = {
+  transcript: object;
+  videoDuration?: number;
+  /** Direcionamento de imagem do editor (brief). Orientação, não obrigação. */
+  brief?: string;
+};
+
+/**
+ * Pede ao Claude o plano de inserts (blocos de assunto + termo de busca) para
+ * o formato tela dividida. Não gera cenas. Valida com PlanoInsertsSchema e
+ * clampa os tempos pela duração real do vídeo.
+ */
+export async function planejarInserts(
+  params: PlanejarInsertsParams,
+  options: { model?: string; apiKey?: string } = {},
+): Promise<{ inserts: InsertPlanoItem[] }> {
+  const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error("ANTHROPIC_API_KEY nao definido. Passe via env ou options.apiKey");
+  }
+
+  const client = new Anthropic({ apiKey });
+  const model = options.model ?? DEFAULT_MODEL;
+  // Busca de dado recente (overlay de texto): opcional, ligada por env, pois exige
+  // a ferramenta web_search habilitada na conta Anthropic e adiciona custo/latencia.
+  let usarBuscaDados = process.env.INSERTS_DADOS_RECENTES === "1";
+  const userPrompt = buildInsertPrompt({ transcript: params.transcript, brief: params.brief, permitirBuscaDados: usarBuscaDados });
+
+  // Ferramenta de busca web nativa (server tool). Tipo derivado do SDK p/ nao
+  // depender da versao exata. Traz dado/fato recente e verificavel (nao imagem).
+  const webSearchTool = { type: "web_search_20250305", name: "web_search", max_uses: 2 };
+
+  const temperaturas = [0.4, 0.2, 0.0];
+  let ultimaResposta = "";
+  let ultimoErroZod: ZodError | undefined;
+
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: userPrompt }];
+    if (tentativa > 1 && ultimoErroZod) {
+      messages.push({ role: "assistant", content: ultimaResposta });
+      messages.push({
+        role: "user",
+        content: `O JSON anterior falhou na validacao Zod com este erro:\n\n${ultimoErroZod.errors
+          .map((e) => `- ${e.path.join(".")}: ${e.message}`)
+          .join("\n")}\n\nCorrija e retorne apenas o JSON valido.`,
+      });
+    }
+
+    const baseParams = {
+      model,
+      max_tokens: 8000,
+      temperature: temperaturas[tentativa - 1],
+      system: [{ type: "text" as const, text: SYSTEM_PROMPT_INSERTS, cache_control: { type: "ephemeral" as const } }],
+      messages,
+    };
+
+    let response;
+    try {
+      response = await client.messages.create(
+        usarBuscaDados
+          ? { ...baseParams, tools: [webSearchTool] as unknown as Anthropic.MessageCreateParamsNonStreaming["tools"] }
+          : baseParams,
+      );
+    } catch (err) {
+      // web_search pode nao estar habilitada na conta: segue sem a ferramenta.
+      if (usarBuscaDados) {
+        console.warn("[planejarInserts] busca web indisponivel, seguindo sem dado recente:", err);
+        usarBuscaDados = false;
+        response = await client.messages.create(baseParams);
+      } else {
+        throw err;
+      }
+    }
+
+    // Com a ferramenta de busca, a resposta pode ter blocos de tool antes do texto
+    // final — pega o ULTIMO bloco de texto (o JSON), nao o primeiro.
+    const textos = response.content.filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text");
+    const textBlock = textos[textos.length - 1];
+    if (!textBlock) {
+      throw new AnalysisError("Resposta do Claude nao tem bloco de texto", tentativa);
+    }
+    ultimaResposta = textBlock.text;
+
+    if (response.stop_reason === "max_tokens") {
+      ultimoErroZod = undefined;
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stripMarkdownFence(stripAnalysisBlock(ultimaResposta)));
+    } catch {
+      continue;
+    }
+
+    const validation = PlanoInsertsSchema.safeParse(parsed);
+    if (validation.success) {
+      let inserts = validation.data.inserts;
+      const dur = params.videoDuration;
+      if (dur && dur > 0) {
+        inserts = inserts
+          .map((i) => ({ ...i, inicio: Math.min(i.inicio, dur), fim: Math.min(i.fim, dur) }))
+          .filter((i) => i.fim > i.inicio);
+      }
+      return { inserts };
+    }
+
+    ultimoErroZod = validation.error;
+  }
+
+  throw new AnalysisError(
+    `Falha ao planejar inserts apos 3 tentativas. Ultimo erro: ${
       ultimoErroZod?.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ") ?? "desconhecido"
     }`,
     3,
@@ -561,6 +697,14 @@ export async function refine(
     try { parsed = JSON.parse(stripMarkdownFence(jsonText)); }
     catch { console.error(`[refine] tentativa ${tentativa}: JSON invalido`); continue; }
 
+    // A entrada (scenes.json) tem "especialista_slug" no root; o modelo costuma
+    // devolvê-lo, e a schema é estrita → erro "Unrecognized key especialista_slug"
+    // TODA vez (causa da instabilidade antiga do refine). A rota re-adiciona esse
+    // campo depois, então é seguro remover aqui antes de validar.
+    if (parsed && typeof parsed === "object") {
+      delete (parsed as Record<string, unknown>).especialista_slug;
+    }
+
     const validation = ReelPropsSchema.safeParse(parsed);
     if (validation.success) {
       // Duração do player = janela de trim (end - start), não soma dos overlays.
@@ -587,7 +731,10 @@ export async function refine(
       };
     }
 
-    console.error(`[refine] tentativa ${tentativa}: schema invalido, retentando...`);
+    console.error(
+      `[refine] tentativa ${tentativa}: schema invalido (${validation.error.errors.length} erros): ` +
+      validation.error.errors.slice(0, 10).map((e) => `${e.path.join(".") || "(raiz)"}: ${e.message}`).join(" | "),
+    );
     ultimoErroZod = validation.error;
   }
 

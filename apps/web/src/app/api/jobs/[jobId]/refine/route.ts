@@ -11,7 +11,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
-import { refine, AnalysisError } from "../../../../../services/analysis-bridge";
+import { refine, planejarInserts, AnalysisError } from "../../../../../services/analysis-bridge";
+import { buscarInserts } from "../../../../../services/inserts";
 import { getEspecialistaOrGenerico } from "../../../../../lib/db";
 import { getVideoDuration } from "../../../../../lib/video-duration";
 
@@ -78,6 +79,53 @@ export async function POST(
   })();
   const videoPathLocal = videoFile ? path.join(jobDir, videoFile) : cenasAtuais.video_original_path;
   const videoDuration = videoPathLocal ? await getVideoDuration(videoPathLocal) : null;
+
+  // Formatos com inserts (tela dividida / narrado): "Refinar com IA" REGERA os
+  // inserts do zero (novo plano + nova busca). O motor de cenas/refine não
+  // entende inserts — chamar refine() aqui sempre falha na validação. Preserva o
+  // layout/trim/CTA do job e só troca a lista de inserts.
+  const formato = cenasAtuais.formato;
+  if (formato === "tela_dividida" || formato === "narrado") {
+    try {
+      const briefFinal = [rawEsp.brief_padrao, brief].filter(Boolean).join("\n\n---\nBRIEF DO JOB:\n") || undefined;
+      const plano = await planejarInserts({
+        transcript,
+        videoDuration: videoDuration ?? undefined,
+        brief: briefFinal,
+      });
+      const inserts = await buscarInserts(jobDir, jobId, plano.inserts);
+
+      const scenesRegeneradas = { ...cenasAtuais };
+      if (formato === "tela_dividida") {
+        const cfg = cenasAtuais.tela_dividida ?? {};
+        scenesRegeneradas.tela_dividida = {
+          especialista_posicao: cfg.especialista_posicao ?? "inicio",
+          split_pct: cfg.split_pct ?? 55,
+          inserts,
+        };
+      } else {
+        scenesRegeneradas.narrado = { ...(cenasAtuais.narrado ?? {}), inserts };
+      }
+      await writeFile(scenesPath, JSON.stringify(scenesRegeneradas, null, 2), "utf-8");
+
+      return NextResponse.json({
+        scenes: scenesRegeneradas,
+        metadata: { regenerouInserts: true, totalInserts: inserts.length },
+      });
+    } catch (err) {
+      console.error("[refine/inserts] erro:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      const isCredits = message.includes("credit balance");
+      return NextResponse.json(
+        {
+          error: isCredits
+            ? "Saldo insuficiente na API Anthropic. Acesse platform.claude.com/settings/billing para adicionar creditos."
+            : "Erro ao regerar inserts: " + message,
+        },
+        { status: 500 },
+      );
+    }
+  }
 
   try {
     const result = await refine({

@@ -15,9 +15,11 @@ import {
   interpolate,
   Audio,
   staticFile,
+  Img,
 } from "remotion";
 import { useEffect } from "react";
-import type { ReelProps, Cena } from "@pontob/schema";
+import type { ReelProps, Cena, LegendaConfig, LegendaPalavra, Regiao, CtaFinal as CtaFinalConfig } from "@pontob/schema";
+import { agruparEmFrases, posicaoEfetiva, cenaSuprimeLegenda } from "@pontob/schema";
 
 const FPS = 30;
 
@@ -159,6 +161,17 @@ export const ReelForPlayer: React.FC<ReelProps> = (props) => {
     document.head.appendChild(link);
   }, [props.fonte_url]);
 
+  // Formato "tela dividida": layout próprio (espelho de TelaDividida do render).
+  if (props.formato === "tela_dividida") {
+    return <SplitLayoutPlayer props={props} />;
+  }
+  if (props.formato === "aula") {
+    return <AulaLayoutPlayer props={props} />;
+  }
+  if (props.formato === "narrado") {
+    return <NarradoLayoutPlayer props={props} />;
+  }
+
   return (
     <AbsoluteFill style={{ backgroundColor: colors.navy }}>
       {videoPath ? (
@@ -195,6 +208,469 @@ export const ReelForPlayer: React.FC<ReelProps> = (props) => {
           <SceneRouter cena={cena} corPrimaria={props.cor_primaria} corSecundaria={props.cor_secundaria} fonteFamilia={props.fonte_familia} />
         </Sequence>
       ))}
+
+      {/* Legenda contínua — espelho do apps/remotion (LegendaContinua). */}
+      {props.legenda?.ativa && props.legenda_palavras && props.legenda_palavras.length > 0 ? (
+        <LegendaOverlay
+          palavras={props.legenda_palavras}
+          config={props.legenda}
+          corPrimaria={props.cor_primaria}
+          corSecundaria={props.cor_secundaria}
+          fonteFamilia={props.fonte_familia}
+          videoStartSegundos={props.video_start_segundos ?? 0}
+          janelasSuprimidas={sequencias
+            .filter(({ cena }) => cenaSuprimeLegenda(cena.tipo))
+            .map(({ inicioFrames, duracaoFrames }) => [inicioFrames, inicioFrames + duracaoFrames] as [number, number])}
+        />
+      ) : null}
+    </AbsoluteFill>
+  );
+};
+
+// ── Legenda contínua (overlay) ────────────────────────────────────────────────
+// Espelho de apps/remotion/src/scenes/LegendaContinua.tsx para o preview no
+// @remotion/player. Mesma lógica; usa o tema inline deste arquivo.
+
+const LEG_SOMBRA = "0 4px 20px rgba(0,0,0,0.55), 0 2px 4px rgba(0,0,0,0.65)";
+const LEG_SOMBRA_FORTE = "0 0 3px rgba(0,0,0,0.95), 0 0 10px rgba(0,0,0,0.9), 0 3px 14px rgba(0,0,0,0.85)";
+const LEG_SEGURA_SILENCIO_S = 1.0;
+
+function legIndiceAtivo(palavras: { inicio: number }[], t: number): number {
+  let idx = -1;
+  for (let i = 0; i < palavras.length; i++) {
+    if (palavras[i].inicio <= t) idx = i;
+    else break;
+  }
+  return idx;
+}
+
+const LegendaOverlay: React.FC<{
+  palavras: LegendaPalavra[];
+  config: LegendaConfig;
+  corPrimaria?: string;
+  corSecundaria?: string;
+  fonteFamilia?: string;
+  videoStartSegundos: number;
+  janelasSuprimidas: [number, number][];
+  posicaoForcada?: "alto" | "centro" | "rodape";
+  offsetSeamPct?: number;
+}> = ({ palavras, config, corPrimaria, corSecundaria, fonteFamilia, videoStartSegundos, janelasSuprimidas, posicaoForcada, offsetSeamPct }) => {
+  const frame = useCurrentFrame();
+  const { fps, width, height } = useVideoConfig();
+  const scale = Math.min(width / 1080, height / 1920);
+  const safeBottom = Math.round(height * 0.22);
+  const safeTop = Math.round(height * 0.105);
+  const fontFamily = resolveFontFamily(fonteFamilia);
+  const posicao = posicaoForcada ?? posicaoEfetiva(config);
+  const sombra = posicaoForcada != null ? LEG_SOMBRA_FORTE : LEG_SOMBRA;
+  const padX = Math.round(64 * scale);
+
+  if (janelasSuprimidas.some(([a, b]) => frame >= a && frame < b)) return null;
+  if (!palavras.length) return null;
+
+  const t = videoStartSegundos + frame / fps;
+  const framesDe = (s: number) => Math.round((s - videoStartSegundos) * fps);
+  const popDe = (inicioSeg: number) => {
+    const s = spring({ frame: Math.max(0, frame - framesDe(inicioSeg)), fps, config: { damping: 16, stiffness: 120, mass: 0.5 } });
+    return { opacity: interpolate(s, [0, 1], [0, 1]), scale: interpolate(s, [0, 1], [0.72, 1]) };
+  };
+
+  const container: React.CSSProperties = {
+    alignItems: "center",
+    padding: `0 ${padX}px`,
+    textAlign: "center",
+    pointerEvents: "none",
+    ...(posicao === "alto"
+      ? { justifyContent: "flex-start", paddingTop: Math.round(safeTop + height * 0.06) }
+      : posicao === "rodape"
+      ? { justifyContent: "flex-end", paddingBottom: safeBottom }
+      : { justifyContent: "center" }),
+  };
+  const offsetY = Math.round((((config.deslocamento_y ?? 0) + (offsetSeamPct ?? 0)) / 100) * height);
+  if (offsetY !== 0) container.transform = `translateY(${offsetY}px)`;
+  const caixaStyle: React.CSSProperties = config.caixa
+    ? { background: "rgba(0,0,0,0.55)", padding: `${Math.round(10 * scale)}px ${Math.round(22 * scale)}px`, borderRadius: Math.round(14 * scale) }
+    : {};
+  const envolver = (inner: React.ReactNode) => <AbsoluteFill style={container}>{inner}</AbsoluteFill>;
+
+  if (config.estilo === "palavra_unica") {
+    const idx = legIndiceAtivo(palavras, t);
+    if (idx < 0) return null;
+    const atual = palavras[idx];
+    const proxInicio = palavras[idx + 1]?.inicio ?? Infinity;
+    if (t > atual.fim + LEG_SEGURA_SILENCIO_S && t < proxInicio) return null;
+    const pop = popDe(atual.inicio);
+    return envolver(
+      <div style={{ ...caixaStyle, fontFamily, fontWeight: 800, fontSize: Math.round(90 * scale), lineHeight: 1.05, letterSpacing: -1, color: colors.white, textShadow: sombra, opacity: pop.opacity, transform: `scale(${pop.scale})` }}>
+        {atual.texto}
+      </div>,
+    );
+  }
+
+  const frases = agruparEmFrases(palavras, config.palavras_por_frase ?? 3);
+  const fi = legIndiceAtivo(frases, t);
+  if (fi < 0) return null;
+  const frase = frases[fi];
+  const proximaFrase = frases[fi + 1]?.inicio ?? Infinity;
+  if (t > frase.fim + LEG_SEGURA_SILENCIO_S && t < proximaFrase) return null;
+
+  if (config.estilo === "frase_limpa") {
+    const s = spring({ frame: Math.max(0, frame - framesDe(frase.inicio)), fps, config: { damping: 200, stiffness: 100 } });
+    return envolver(
+      <div style={{ ...caixaStyle, fontFamily, fontWeight: 700, fontSize: Math.round(48 * scale), lineHeight: 1.22, color: colors.white, textShadow: sombra, maxWidth: "90%", opacity: interpolate(s, [0, 1], [0, 1]) }}>
+        {frase.palavras.map((p) => p.texto).join(" ")}
+      </div>,
+    );
+  }
+
+  const corDestaque = resolveWordColor(config.cor_destaque ?? "primaria", corPrimaria, corSecundaria);
+  return envolver(
+    <div style={{ ...caixaStyle, fontFamily, fontWeight: 800, fontSize: Math.round(56 * scale), lineHeight: 1.15, letterSpacing: -0.5, textShadow: sombra, maxWidth: "92%", display: "flex", flexWrap: "wrap", justifyContent: "center", gap: `${Math.round(6 * scale)}px ${Math.round(16 * scale)}px` }}>
+      {frase.palavras.map((p, i) => {
+        const jaFalada = p.inicio <= t;
+        const proxNaFrase = frase.palavras[i + 1]?.inicio ?? frase.fim + 0.001;
+        const ativa = t >= p.inicio && t < proxNaFrase;
+        const pop = popDe(p.inicio);
+        return (
+          <span key={i} style={{ color: ativa ? corDestaque : colors.white, opacity: jaFalada ? pop.opacity : 0.32, transform: ativa ? `scale(${pop.scale})` : "none", display: "inline-block" }}>
+            {p.texto}
+          </span>
+        );
+      })}
+    </div>,
+  );
+};
+
+// ── Tela dividida (espelho de apps/remotion/src/scenes/TelaDividida.tsx) ──────
+
+const InsertKenBurnsPlayer: React.FC<{ src: string; durF: number }> = ({ src, durF }) => {
+  const frame = useCurrentFrame();
+  const k = interpolate(frame, [0, durF], [1.0, 1.1], { extrapolateRight: "clamp" });
+  const px = interpolate(frame, [0, durF], [-2, 2], { extrapolateRight: "clamp" });
+  return (
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <Img src={src} style={{ width: "100%", height: "100%", objectFit: "cover", transform: `scale(${k}) translateX(${px}%)` }} />
+    </AbsoluteFill>
+  );
+};
+
+/** B-roll de vídeo (mudo) — espelho de InsertVideo/InsertFullVideo. Sem fade. */
+const InsertVideoPlayer: React.FC<{ src: string }> = ({ src }) => {
+  return (
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <Video src={src} muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+    </AbsoluteFill>
+  );
+};
+
+/** Faixa de texto sobre o insert — espelho de OverlayTextoInsert. */
+const OverlayTextoInsertPlayer: React.FC<{ texto: string }> = ({ texto }) => (
+  <AbsoluteFill style={{ justifyContent: "flex-end", pointerEvents: "none" }}>
+    <div style={{ margin: "0 5% 7%", background: "rgba(8,15,25,0.82)", borderLeft: "5px solid #f5a623", borderRadius: 8, padding: "12px 16px", color: "#fff", fontSize: 36, fontWeight: 600, lineHeight: 1.25, textShadow: "0 2px 8px rgba(0,0,0,0.6)" }}>{texto}</div>
+  </AbsoluteFill>
+);
+
+// Espelho de resolverAssetsInsert: bloco sem asset herda o do vizinho (não fica preto).
+type AssetLikeP = { tipo?: string; video_url?: string; image_url?: string };
+function resolverAssetsPlayer<T extends AssetLikeP>(inserts: T[]): (T | null)[] {
+  const tem = (x?: T | null) => !!x && ((x.tipo === "video" && !!x.video_url) || !!x.image_url);
+  const out: (T | null)[] = new Array(inserts.length).fill(null);
+  let ult: T | null = null;
+  for (let i = 0; i < inserts.length; i++) { if (tem(inserts[i])) ult = inserts[i]; out[i] = tem(inserts[i]) ? inserts[i] : ult; }
+  let prox: T | null = null;
+  for (let i = inserts.length - 1; i >= 0; i--) { if (tem(inserts[i])) prox = inserts[i]; if (!out[i]) out[i] = prox; }
+  return out;
+}
+
+const SplitLayoutPlayer: React.FC<{ props: ReelProps }> = ({ props }) => {
+  const { width, height } = useVideoConfig();
+  const vertical = height >= width;
+  const cfg = props.tela_dividida;
+  const splitPct = cfg?.split_pct ?? 55;
+  const especialistaPrimeiro = (cfg?.especialista_posicao ?? "inicio") === "inicio";
+  const inserts = cfg?.inserts ?? [];
+
+  const videoStart = props.video_start_segundos ?? 0;
+  const videoStartFrom = Math.round(videoStart * FPS);
+  const videoEndRaw = (props as Record<string, unknown>).video_end_segundos;
+  const videoEndAt = typeof videoEndRaw === "number" && videoEndRaw > videoStart ? Math.round(videoEndRaw * FPS) : undefined;
+  const videoPath = props.video_original_path ?? undefined;
+
+  const videoHalf = (
+    <AbsoluteFill style={{ overflow: "hidden", background: "#000" }}>
+      {videoPath ? (
+        <>
+          <svg width={0} height={0} style={{ position: "absolute" }} aria-hidden>
+            <defs>
+              <filter id="esp-sharpen">
+                <feConvolveMatrix order="3" preserveAlpha="true" kernelMatrix="0 -0.4 0  -0.4 2.6 -0.4  0 -0.4 0" />
+              </filter>
+            </defs>
+          </svg>
+          <Video src={videoPath} startFrom={videoStartFrom} {...(videoEndAt != null ? { endAt: videoEndAt } : {})} style={{ width: "100%", height: "100%", objectFit: "cover", filter: "url(#esp-sharpen)" }} />
+        </>
+      ) : null}
+    </AbsoluteFill>
+  );
+  const fromsSplit = inserts.map((ins) => Math.max(0, Math.round((ins.inicio - videoStart) * FPS)));
+  const endFrameRelSplit = videoEndAt != null
+    ? videoEndAt - videoStartFrom
+    : (inserts.length ? fromsSplit[fromsSplit.length - 1] + Math.max(1, Math.round((inserts[inserts.length - 1].fim - inserts[inserts.length - 1].inicio) * FPS)) : 0);
+  const assetsSplit = resolverAssetsPlayer(inserts);
+  const insertHalf = (
+    <AbsoluteFill style={{ overflow: "hidden", background: "#000" }}>
+      {inserts.map((ins, i) => {
+        const asset = assetsSplit[i];
+        if (!asset) return null;
+        const ehVideo = asset.tipo === "video" && !!asset.video_url;
+        const from = fromsSplit[i];
+        const durF = Math.max(1, (i < inserts.length - 1 ? fromsSplit[i + 1] : endFrameRelSplit) - from);
+        return (
+          <Sequence key={i} from={from} durationInFrames={durF} name={`insert-${i}`}>
+            {ehVideo ? <InsertVideoPlayer src={asset.video_url as string} /> : <InsertKenBurnsPlayer src={asset.image_url as string} durF={durF} />}
+            {ins.overlay_texto ? <OverlayTextoInsertPlayer texto={ins.overlay_texto} /> : null}
+          </Sequence>
+        );
+      })}
+    </AbsoluteFill>
+  );
+
+  const a = especialistaPrimeiro ? videoHalf : insertHalf;
+  const b = especialistaPrimeiro ? insertHalf : videoHalf;
+  const primeiro: React.CSSProperties = vertical
+    ? { position: "absolute", top: 0, left: 0, right: 0, height: `${splitPct}%`, overflow: "hidden" }
+    : { position: "absolute", top: 0, bottom: 0, left: 0, width: `${splitPct}%`, overflow: "hidden" };
+  const segundo: React.CSSProperties = vertical
+    ? { position: "absolute", bottom: 0, left: 0, right: 0, height: `${100 - splitPct}%`, overflow: "hidden" }
+    : { position: "absolute", top: 0, bottom: 0, right: 0, width: `${100 - splitPct}%`, overflow: "hidden" };
+
+  const legenda = props.legenda;
+  const offsetSeam = vertical ? splitPct - 50 : 0;
+
+  return (
+    <AbsoluteFill style={{ backgroundColor: "#000" }}>
+      <div style={primeiro}>{a}</div>
+      <div style={segundo}>{b}</div>
+      {props.musica_fundo ? (
+        <Audio src={`/musica/${props.musica_fundo.path.replace(/^musica\//, "")}`} volume={Math.min(1, (props.musica_fundo.volume ?? 3) / 10)} />
+      ) : null}
+      {legenda?.ativa && props.legenda_palavras && props.legenda_palavras.length > 0 ? (
+        <LegendaOverlay
+          palavras={props.legenda_palavras}
+          config={legenda}
+          corPrimaria={props.cor_primaria}
+          corSecundaria={props.cor_secundaria}
+          fonteFamilia={props.fonte_familia}
+          videoStartSegundos={videoStart}
+          janelasSuprimidas={[]}
+          posicaoForcada="centro"
+          offsetSeamPct={offsetSeam}
+        />
+      ) : null}
+      <CtaFinalSequencePlayer props={props} />
+    </AbsoluteFill>
+  );
+};
+
+// ── CTA final (espelho de apps/remotion/src/scenes/CtaFinal.tsx) ──────────────
+
+function escurecerHexPlayer(hex: string, f: number): string {
+  const h = hex.replace("#", "");
+  if (h.length !== 6 || /[^0-9a-fA-F]/.test(h)) return hex;
+  const n = parseInt(h, 16);
+  return `rgb(${Math.round(((n >> 16) & 255) * f)}, ${Math.round(((n >> 8) & 255) * f)}, ${Math.round((n & 255) * f)})`;
+}
+
+const CtaFinalPlayer: React.FC<{ config: CtaFinalConfig; corPrimaria?: string; corSecundaria?: string; fonteFamilia?: string }> = ({ config, corPrimaria, corSecundaria, fonteFamilia }) => {
+  const frame = useCurrentFrame();
+  const { fps, width, height } = useVideoConfig();
+  const scale = Math.min(width / 1080, height / 1920);
+  const fontFamily = resolveFontFamily(fonteFamilia);
+  const entrada = spring({ frame, fps, config: { damping: 14, stiffness: 90 } });
+  const opacity = interpolate(entrada, [0, 1], [0, 1]);
+  const ty = interpolate(entrada, [0, 1], [40, 0]);
+  const accent = corSecundaria ?? colors.yellow;
+  const setaY = 16 * Math.sin((frame / fps) * 2 * Math.PI * 1.4);
+  const gradTopo = corPrimaria ?? colors.navy;
+  const gradBase = corPrimaria ? escurecerHexPlayer(corPrimaria, 0.24) : colors.navyDeep;
+  return (
+    <AbsoluteFill>
+      <AbsoluteFill style={{ background: `linear-gradient(150deg, ${gradTopo} 0%, ${gradBase} 100%)` }} />
+      <AbsoluteFill style={{ background: "radial-gradient(ellipse at center, rgba(0,0,0,0.52) 0%, rgba(0,0,0,0.18) 72%)" }} />
+      <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", padding: `0 ${Math.round(64 * scale)}px`, textAlign: "center" }}>
+        {config.logo_url ? <Img src={config.logo_url} style={{ maxWidth: "58%", maxHeight: "20%", objectFit: "contain", marginBottom: Math.round(44 * scale), opacity, transform: `translateY(${ty}px)` }} /> : null}
+        {config.copy ? <div style={{ opacity, transform: `translateY(${ty}px)`, fontFamily, fontWeight: 800, fontSize: Math.round(84 * scale), lineHeight: 1.06, letterSpacing: `${-0.5 * scale}px`, textTransform: "uppercase", color: colors.white, maxWidth: "92%", textShadow: "0 2px 16px rgba(0,0,0,0.5)" }}>{config.copy}</div> : null}
+        {config.copy || config.logo_url ? <div style={{ marginTop: Math.round(40 * scale), fontSize: Math.round(96 * scale), lineHeight: 1, color: accent, opacity, transform: `translateY(${setaY}px)` }}>↓</div> : null}
+      </AbsoluteFill>
+    </AbsoluteFill>
+  );
+};
+
+const CtaFinalSequencePlayer: React.FC<{ props: ReelProps }> = ({ props }) => {
+  const cta = props.cta_final;
+  if (!cta?.ativo) return null;
+  const videoStart = props.video_start_segundos ?? 0;
+  const videoEndRaw = (props as Record<string, unknown>).video_end_segundos;
+  const videoEndSeg = typeof videoEndRaw === "number" && videoEndRaw > videoStart ? videoEndRaw : null;
+  if (videoEndSeg == null) return null;
+  const from = Math.round((videoEndSeg - videoStart) * FPS);
+  const dur = Math.round(cta.duracao_segundos * FPS);
+  return (
+    <Sequence from={from} durationInFrames={dur} name="cta-final">
+      <CtaFinalPlayer config={cta} corPrimaria={props.cor_primaria} corSecundaria={props.cor_secundaria} fonteFamilia={props.fonte_familia} />
+    </Sequence>
+  );
+};
+
+// ── Narrado (espelho de apps/remotion/src/scenes/NarradoLayout.tsx) ───────────
+
+const InsertFullPlayer: React.FC<{ src: string; durF: number }> = ({ src, durF }) => {
+  const frame = useCurrentFrame();
+  const k = interpolate(frame, [0, durF], [1.0, 1.08], { extrapolateRight: "clamp" });
+  const px = interpolate(frame, [0, durF], [-1.5, 1.5], { extrapolateRight: "clamp" });
+  return (
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <Img src={src} style={{ width: "100%", height: "100%", objectFit: "cover", transform: `scale(${k}) translateX(${px}%)` }} />
+    </AbsoluteFill>
+  );
+};
+
+const NarradoLayoutPlayer: React.FC<{ props: ReelProps }> = ({ props }) => {
+  const inserts = props.narrado?.inserts ?? [];
+  const videoPath = props.video_original_path ?? undefined;
+  const videoStart = props.video_start_segundos ?? 0;
+  const videoStartFrom = Math.round(videoStart * FPS);
+  const videoEndRaw = (props as Record<string, unknown>).video_end_segundos;
+  const videoEndAt = typeof videoEndRaw === "number" && videoEndRaw > videoStart ? Math.round(videoEndRaw * FPS) : undefined;
+  const legenda = props.legenda;
+  return (
+    <AbsoluteFill style={{ backgroundColor: "#000" }}>
+      {videoPath ? (
+        <>
+          <svg width={0} height={0} style={{ position: "absolute" }} aria-hidden>
+            <defs>
+              <filter id="esp-sharpen">
+                <feConvolveMatrix order="3" preserveAlpha="true" kernelMatrix="0 -0.4 0  -0.4 2.6 -0.4  0 -0.4 0" />
+              </filter>
+            </defs>
+          </svg>
+          <Video src={videoPath} startFrom={videoStartFrom} {...(videoEndAt != null ? { endAt: videoEndAt } : {})} style={{ width: "100%", height: "100%", objectFit: "cover", filter: "url(#esp-sharpen)" }} />
+        </>
+      ) : null}
+      {(() => {
+        const fr = inserts.map((x) => Math.max(0, Math.round((x.inicio - videoStart) * FPS)));
+        const endRel = videoEndAt != null
+          ? videoEndAt - videoStartFrom
+          : (inserts.length ? fr[fr.length - 1] + Math.max(1, Math.round((inserts[inserts.length - 1].fim - inserts[inserts.length - 1].inicio) * FPS)) : 0);
+        const assetsN = resolverAssetsPlayer(inserts);
+        return inserts.map((ins, i) => {
+          const asset = assetsN[i];
+          const from = fr[i];
+          const durF = Math.max(1, (i < inserts.length - 1 ? fr[i + 1] : endRel) - from);
+          const ehVideo = !!asset && asset.tipo === "video" && !!asset.video_url;
+          return (
+            <Sequence key={i} from={from} durationInFrames={durF} name={`insert-${i}`}>
+              {asset ? (ehVideo ? <InsertVideoPlayer src={asset.video_url as string} /> : <InsertFullPlayer src={asset.image_url as string} durF={durF} />) : null}
+              {ins.overlay_texto ? <OverlayTextoInsertPlayer texto={ins.overlay_texto} /> : null}
+            </Sequence>
+          );
+        });
+      })()}
+      {legenda?.ativa && props.legenda_palavras && props.legenda_palavras.length > 0 ? (
+        <LegendaOverlay palavras={props.legenda_palavras} config={legenda} corPrimaria={props.cor_primaria} corSecundaria={props.cor_secundaria} fonteFamilia={props.fonte_familia} videoStartSegundos={videoStart} janelasSuprimidas={[]} />
+      ) : null}
+      <CtaFinalSequencePlayer props={props} />
+    </AbsoluteFill>
+  );
+};
+
+// ── Aula (espelho de apps/remotion/src/scenes/AulaLayout.tsx) ─────────────────
+
+const CropViewPlayer: React.FC<{
+  src: string; regiao: Regiao; fit: "cover" | "contain";
+  containerW: number; containerH: number; sourceAspect: number;
+  startFrom: number; endAt?: number; bg?: string; sharpen?: boolean;
+}> = ({ src, regiao, fit, containerW, containerH, sourceAspect, startFrom, endAt, bg = "#0a1420", sharpen = false }) => {
+  const { x, y, w, h } = regiao;
+  const D = fit === "cover"
+    ? Math.max(containerW / w, (containerH * sourceAspect) / h)
+    : Math.min(containerW / w, (containerH * sourceAspect) / h);
+  const videoW = D;
+  const videoH = D / sourceAspect;
+  const left = (containerW - w * videoW) / 2 - x * videoW;
+  const top = (containerH - h * videoH) / 2 - y * videoH;
+  return (
+    <AbsoluteFill style={{ overflow: "hidden", background: bg }}>
+      {sharpen ? (
+        <svg width={0} height={0} style={{ position: "absolute" }} aria-hidden>
+          <defs>
+            <filter id="aula-sharpen">
+              <feConvolveMatrix order="3" preserveAlpha="true" kernelMatrix="0 -0.4 0  -0.4 2.6 -0.4  0 -0.4 0" />
+            </filter>
+          </defs>
+        </svg>
+      ) : null}
+      <Video src={src} muted startFrom={startFrom} {...(endAt != null ? { endAt } : {})} style={{ position: "absolute", width: videoW, height: videoH, left, top, objectFit: "fill", filter: sharpen ? "url(#aula-sharpen)" : undefined }} />
+    </AbsoluteFill>
+  );
+};
+
+const AulaLayoutPlayer: React.FC<{ props: ReelProps }> = ({ props }) => {
+  const { width, height } = useVideoConfig();
+  const vertical = height >= width;
+  const cfg = props.aula;
+  const splitPct = cfg?.split_pct ?? 60;
+  const cameraRegiao: Regiao = cfg?.camera_regiao ?? { x: 0.008, y: 0.319, w: 0.175, h: 0.333 };
+  const slideRegiao: Regiao = cfg?.slide_regiao ?? { x: 0.1875, y: 0, w: 0.8125, h: 1 };
+  const sourceAspect = cfg?.source_aspect ?? 16 / 9;
+  const slideInicio = cfg?.slide_inicio_segundos ?? 0;
+
+  const videoPath = props.video_original_path ?? "";
+  const videoStart = props.video_start_segundos ?? 0;
+  const videoStartFrom = Math.round(videoStart * FPS);
+  const videoEndRaw = (props as Record<string, unknown>).video_end_segundos;
+  const videoEndAt = typeof videoEndRaw === "number" && videoEndRaw > videoStart ? Math.round(videoEndRaw * FPS) : undefined;
+
+  const slideW = vertical ? width : Math.round(width * (splitPct / 100));
+  const slideH = vertical ? Math.round(height * (splitPct / 100)) : height;
+  const specW = vertical ? width : width - slideW;
+  const specH = vertical ? height - slideH : height;
+
+  const slidePane: React.CSSProperties = vertical
+    ? { position: "absolute", top: 0, left: 0, right: 0, height: `${splitPct}%`, overflow: "hidden" }
+    : { position: "absolute", top: 0, bottom: 0, left: 0, width: `${splitPct}%`, overflow: "hidden" };
+  const specPane: React.CSSProperties = vertical
+    ? { position: "absolute", bottom: 0, left: 0, right: 0, height: `${100 - splitPct}%`, overflow: "hidden" }
+    : { position: "absolute", top: 0, bottom: 0, right: 0, width: `${100 - splitPct}%`, overflow: "hidden" };
+
+  const slideInicioFrame = Math.round((slideInicio - videoStart) * FPS);
+  const legenda = props.legenda;
+  const offsetSeam = vertical ? splitPct - 50 : 0;
+
+  return (
+    <AbsoluteFill style={{ backgroundColor: "#000" }}>
+      {videoPath ? (
+        <Audio src={videoPath} startFrom={videoStartFrom} {...(videoEndAt != null ? { endAt: videoEndAt } : {})} />
+      ) : null}
+      <AbsoluteFill>
+        <div style={slidePane}>
+          {videoPath ? <CropViewPlayer src={videoPath} regiao={slideRegiao} fit="contain" containerW={slideW} containerH={slideH} sourceAspect={sourceAspect} startFrom={videoStartFrom} endAt={videoEndAt} /> : null}
+        </div>
+        <div style={specPane}>
+          {videoPath ? <CropViewPlayer src={videoPath} regiao={cameraRegiao} fit="cover" containerW={specW} containerH={specH} sourceAspect={sourceAspect} startFrom={videoStartFrom} endAt={videoEndAt} bg="#000" sharpen /> : null}
+        </div>
+      </AbsoluteFill>
+      {slideInicioFrame > 0 && videoPath ? (
+        <Sequence from={0} durationInFrames={slideInicioFrame} name="intro">
+          <AbsoluteFill style={{ overflow: "hidden", background: "#000" }}>
+            <Video src={videoPath} muted startFrom={videoStartFrom} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          </AbsoluteFill>
+        </Sequence>
+      ) : null}
+      {legenda?.ativa && props.legenda_palavras && props.legenda_palavras.length > 0 ? (
+        <LegendaOverlay palavras={props.legenda_palavras} config={legenda} corPrimaria={props.cor_primaria} corSecundaria={props.cor_secundaria} fonteFamilia={props.fonte_familia} videoStartSegundos={videoStart} janelasSuprimidas={[]} posicaoForcada="centro" offsetSeamPct={offsetSeam} />
+      ) : null}
+      <CtaFinalSequencePlayer props={props} />
     </AbsoluteFill>
   );
 };

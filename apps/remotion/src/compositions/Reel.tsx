@@ -1,7 +1,7 @@
 import { AbsoluteFill, Sequence, OffthreadVideo, Audio, staticFile, delayRender, continueRender } from "remotion";
 import { useMemo, useEffect, useRef } from "react";
 
-import { ReelPropsSchema, type ReelProps, type Cena } from "@pontob/schema";
+import { ReelPropsSchema, type ReelProps, type Cena, cenaSuprimeLegenda } from "@pontob/schema";
 
 import { HookScene } from "../scenes/HookScene";
 import { CtaScene } from "../scenes/CtaScene";
@@ -15,6 +15,10 @@ import { ConviteEventoScene } from "../scenes/ConviteEventoScene";
 import { GraficoLinhaScene } from "../scenes/GraficoLinhaScene";
 import { GraficoBarraScene } from "../scenes/GraficoBarraScene";
 import { PlaceholderScene } from "../scenes/PlaceholderScene";
+import { LegendaContinua } from "../scenes/LegendaContinua";
+import { TelaDividida } from "../scenes/TelaDividida";
+import { AulaLayout } from "../scenes/AulaLayout";
+import { NarradoLayout } from "../scenes/NarradoLayout";
 import { colors, resolveAudioSrc } from "../theme";
 
 export { ReelPropsSchema, type ReelProps };
@@ -62,6 +66,16 @@ export const Reel: React.FC<ReelProps> = (props) => {
     });
   }, [props.cenas]);
 
+  // Janelas (em frames) em que a legenda contínua fica escondida, porque a
+  // cena naquele intervalo já tem texto próprio (Hook, gráficos, CTA, etc.).
+  const janelasSuprimidas = useMemo<[number, number][]>(
+    () =>
+      sequencias
+        .filter(({ cena }) => cenaSuprimeLegenda(cena.tipo))
+        .map(({ inicioFrames, duracaoFrames }) => [inicioFrames, inicioFrames + duracaoFrames] as [number, number]),
+    [sequencias],
+  );
+
   const videoPath =
     props.video_original_path ??
     (props.cenas.find((c) => "video_path" in c) as { video_path: string } | undefined)
@@ -74,6 +88,20 @@ export const Reel: React.FC<ReelProps> = (props) => {
   const videoEndAt = props.video_end_segundos != null
     ? Math.round((props.video_end_segundos as number) * FPS)
     : undefined;
+
+  // Formato "tela dividida": layout próprio (especialista + inserts), não a
+  // timeline de cenas. Legenda entra na junção das telas.
+  if (props.formato === "tela_dividida") {
+    return <TelaDividida props={props} />;
+  }
+
+  if (props.formato === "aula") {
+    return <AulaLayout props={props} />;
+  }
+
+  if (props.formato === "narrado") {
+    return <NarradoLayout props={props} />;
+  }
 
   return (
     <AbsoluteFill style={{ backgroundColor: colors.navy }}>
@@ -121,6 +149,20 @@ export const Reel: React.FC<ReelProps> = (props) => {
           />
         </Sequence>
       ))}
+
+      {/* Legenda contínua — camada única sobre todo o vídeo, escondida nas
+          cenas com texto próprio. Só renderiza quando ativa e com dados. */}
+      {props.legenda?.ativa && props.legenda_palavras && props.legenda_palavras.length > 0 ? (
+        <LegendaContinua
+          palavras={props.legenda_palavras}
+          config={props.legenda}
+          corPrimaria={props.cor_primaria}
+          corSecundaria={props.cor_secundaria}
+          fonteFamilia={props.fonte_familia}
+          videoStartSegundos={props.video_start_segundos ?? 0}
+          janelasSuprimidas={janelasSuprimidas}
+        />
+      ) : null}
     </AbsoluteFill>
   );
 };

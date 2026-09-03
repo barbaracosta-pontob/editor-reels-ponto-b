@@ -82,3 +82,10 @@ yarn-error.log*
 .turbo/
 *.tsbuildinfo
 .interface-design/
+.next-instance*/
+
+# Copias de conveniencia dos renders (o original fica em jobs/<id>/out/)
+exports/
+
+# Quarentena local de arquivos que a ponte nao consegue apagar
+_to_delete/

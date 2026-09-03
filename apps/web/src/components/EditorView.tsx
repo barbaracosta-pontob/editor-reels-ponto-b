@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { AppNav } from "@/components/AppNav";
 import { ActionButton } from "@/components/ActionButton";
 import type { Job, Cena } from "@/types";
-import type { ReelProps } from "@pontob/schema";
+import type { ReelProps, LegendaConfig, LegendaPalavra, LegendaFrase, TelaDivididaConfig, AulaConfig, NarradoConfig, CtaFinal } from "@pontob/schema";
+import { agruparEmFrases, LegendaConfigSchema, reescreverFrase } from "@pontob/schema";
 import styles from "./EditorView.module.css";
 
 // Player carregado sem SSR
@@ -78,6 +79,8 @@ export function EditorView({ job, onNew }: EditorViewProps) {
   const [renderError, setRenderError] = useState<string | null>(null);
   const [formatosRender, setFormatosRender] = useState<string[]>(["reels"]);
   const [showRenderModal, setShowRenderModal] = useState(false);
+  // Trava para nao rodar dois loops de polling do mesmo render.
+  const acompanhandoRef = useRef(false);
   const previousOutput = job.outputPath;
 
   const [refining, setRefining] = useState(false);
@@ -102,6 +105,66 @@ export function EditorView({ job, onNew }: EditorViewProps) {
     if (typeof stored === "number" && stored > 0) return stored;
     return videoDuration ?? 0;
   });
+
+  // Legenda contínua — config e palavras (do transcript). Editável com o job aberto.
+  const [legendaConfig, setLegendaConfig] = useState<LegendaConfig>(
+    () => LegendaConfigSchema.parse((job.scenes as Record<string, unknown>)?.legenda ?? {}),
+  );
+  const [legendaPalavras, setLegendaPalavras] = useState<LegendaPalavra[]>(
+    ((job.scenes as Record<string, unknown>)?.legenda_palavras as LegendaPalavra[]) ?? [],
+  );
+  const [showLegendaModal, setShowLegendaModal] = useState(false);
+  const [frasesEdit, setFrasesEdit] = useState<string[]>([]);
+  const [frasesSnapshot, setFrasesSnapshot] = useState<LegendaFrase[]>([]);
+  const temLegendaDisponivel = legendaPalavras.length > 0;
+  const legendaOpcao = legendaConfig.ativa ? legendaConfig.estilo : "nenhuma";
+
+  // Formato tela dividida (definido no processamento; aqui só ajusta layout).
+  const formato = ((job.scenes as Record<string, unknown>)?.formato as string) ?? "cenas";
+  const [telaDividida, setTelaDividida] = useState<TelaDivididaConfig | null>(
+    ((job.scenes as Record<string, unknown>)?.tela_dividida as TelaDivididaConfig) ?? null,
+  );
+  const [aulaConfig, setAulaConfig] = useState<AulaConfig | null>(
+    ((job.scenes as Record<string, unknown>)?.aula as AulaConfig) ?? null,
+  );
+  // Narrado: inserts do editor. Estado para que "Refinar com IA" (regeração)
+  // atualize os inserts na tela, igual à tela dividida.
+  const [narradoConfig, setNarradoConfig] = useState<NarradoConfig | undefined>(
+    (job.scenes as Record<string, unknown>)?.narrado as NarradoConfig | undefined,
+  );
+  // CTA final (encerramento) — editável nos formatos novos.
+  const [ctaFinal, setCtaFinal] = useState<CtaFinal | null>(
+    ((job.scenes as Record<string, unknown>)?.cta_final as CtaFinal) ?? null,
+  );
+  const ctaDur = ctaFinal?.ativo ? (ctaFinal.duracao_segundos ?? 0) : 0;
+
+  async function uploadLogo(file: File) {
+    try {
+      const fd = new FormData();
+      fd.append("logo", file);
+      const res = await fetch(`/api/jobs/${job.id}/logo`, { method: "POST", body: fd });
+      const data = await res.json();
+      if (data?.logo_url) {
+        setCtaFinal((c) => ({ ativo: true, copy: "", duracao_segundos: 4, ...(c ?? {}), logo_url: data.logo_url as string }));
+      }
+    } catch (e) {
+      console.warn("[uploadLogo] falha:", e);
+    }
+  }
+
+  // Abre o modal de correção snapshotando as frases atuais como texto editável.
+  function abrirCorrecaoLegenda() {
+    const frases = agruparEmFrases(legendaPalavras, legendaConfig.palavras_por_frase ?? 3);
+    setFrasesSnapshot(frases);
+    setFrasesEdit(frases.map((f) => f.palavras.map((w) => w.texto).join(" ")));
+    setShowLegendaModal(true);
+  }
+  // Reconstrói as palavras a partir das frases editadas, re-sincronizando os tempos.
+  function salvarCorrecaoLegenda() {
+    const novas = frasesSnapshot.flatMap((f, i) => reescreverFrase(f.palavras, frasesEdit[i] ?? ""));
+    setLegendaPalavras(novas);
+    setShowLegendaModal(false);
+  }
 
   useEffect(() => {
     fetch("/api/musicas").then((r) => r.json()).then(setMusicas).catch(() => {});
@@ -173,7 +236,7 @@ export function EditorView({ job, onNew }: EditorViewProps) {
       return Object.keys(updates).length ? { ...c, ...updates } : c;
     });
     return {
-      duracao_total_estimada: duracaoPlayer,
+      duracao_total_estimada: duracaoPlayer + ctaDur,
       video_original_path: videoUrl,
       video_start_segundos: videoStartSegundos,
       video_end_segundos: videoEndSegundos > videoStartSegundos && videoEndSegundos > 0 ? videoEndSegundos : undefined,
@@ -185,8 +248,102 @@ export function EditorView({ job, onNew }: EditorViewProps) {
       musica_fundo: musicaFundo
         ? { path: musicaFundo.path, volume: parseFloat((musicaFundo.volume / 10).toFixed(2)) }
         : undefined,
+      legenda: legendaConfig,
+      legenda_palavras: legendaConfig.ativa ? legendaPalavras : undefined,
+      formato,
+      tela_dividida: telaDividida ?? undefined,
+      aula: aulaConfig ?? undefined,
+      narrado: narradoConfig ?? undefined,
+      cta_final: ctaFinal ?? undefined,
     } as ReelProps;
-  }, [scenes, duracaoPlayer, job.id, musicaFundo, videoStartSegundos, videoEndSegundos]);
+  }, [scenes, duracaoPlayer, job.id, musicaFundo, videoStartSegundos, videoEndSegundos, legendaConfig, legendaPalavras, formato, telaDividida, aulaConfig, narradoConfig, ctaFinal, ctaDur]);
+
+  /**
+   * Acompanha o render fazendo polling de jobs/<id>/render-status.json.
+   *
+   * Substituiu a leitura de um stream SSE. O stream vivia dentro do `fetch` do
+   * navegador: quando a aba entrava em Back-Forward Cache (minimizar, trocar de
+   * aba, maquina dormir) o Chrome congelava a conexao e o `reader.read()` nunca
+   * mais resolvia NEM rejeitava - a tela ficava travada num frame X/Y para
+   * sempre enquanto o mp4 terminava normalmente em disco. Polling nao tem esse
+   * problema: se um poll falhar ou a aba congelar, o proximo simplesmente
+   * reconecta e reencontra o estado real.
+   */
+  async function acompanharRender(): Promise<void> {
+    if (acompanhandoRef.current) return; // evita dois loops
+    acompanhandoRef.current = true;
+    try {
+      while (true) {
+        await new Promise((r) => setTimeout(r, 1000));
+
+        let st: {
+          status: "idle" | "running" | "done" | "error";
+          phase?: RenderPhase;
+          frames?: number;
+          total?: number;
+          eta?: string;
+          formatLabel?: string;
+          outputs?: Record<string, string>;
+          error?: string;
+          updatedAt?: number;
+        };
+        try {
+          const r = await fetch(`/api/jobs/${job.id}/render/status`, { cache: "no-store" });
+          if (!r.ok) continue;
+          st = await r.json();
+        } catch {
+          continue; // servidor recompilando ou rede piscou - tenta de novo
+        }
+
+        if (st.status === "idle") continue;
+
+        setRenderPhase(st.phase ?? "bundling");
+        setRenderFormatLabel(st.formatLabel ?? "");
+        setRenderProgress(
+          (st.total ?? 0) > 0
+            ? { frames: st.frames ?? 0, total: st.total ?? 0, eta: st.eta ?? "", phase: st.phase }
+            : null,
+        );
+        // Usa o updatedAt do SERVIDOR: e o momento real do ultimo sinal de vida
+        // do render, nao o momento em que o poll chegou.
+        setRenderLastSeenAt(st.updatedAt ?? Date.now());
+
+        if (st.status === "done") {
+          setOutputs(st.outputs && Object.keys(st.outputs).length ? st.outputs : null);
+          setRendering(false);
+          return;
+        }
+        if (st.status === "error") {
+          setRenderError(st.error ?? "Falha na renderizacao");
+          setRendering(false);
+          return;
+        }
+      }
+    } finally {
+      acompanhandoRef.current = false;
+    }
+  }
+
+  // Reatacha a um render que ja estava rodando: cobre F5 na tela de render,
+  // reabrir o job em outra aba, ou voltar depois de fechar o navegador.
+  useEffect(() => {
+    let cancelado = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/jobs/${job.id}/render/status`, { cache: "no-store" });
+        if (!r.ok) return;
+        const st = await r.json();
+        if (cancelado || st.status !== "running") return;
+        setRendering(true);
+        setRenderFormatLabel(st.formatLabel ?? "");
+        setRenderPhase(st.phase ?? "bundling");
+        setRenderLastSeenAt(st.updatedAt ?? Date.now());
+        void acompanharRender();
+      } catch { /* sem render em andamento */ }
+    })();
+    return () => { cancelado = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job.id]);
 
   async function handleRender() {
     setRendering(true);
@@ -195,9 +352,9 @@ export function EditorView({ job, onNew }: EditorViewProps) {
 
     try {
       // Duracao total = janela de trim (fim - inicio). NUNCA soma dos overlays.
-      const duracaoTrim = videoEndSegundos > videoStartSegundos
+      const duracaoTrim = (videoEndSegundos > videoStartSegundos
         ? parseFloat((videoEndSegundos - videoStartSegundos).toFixed(2))
-        : parseFloat(scenes.reduce((acc, s) => acc + s.duracao_segundos, 0).toFixed(2));
+        : parseFloat(scenes.reduce((acc, s) => acc + s.duracao_segundos, 0).toFixed(2))) + ctaDur;
       const saveRes = await fetch(`/api/jobs/${job.id}/scenes`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -210,6 +367,13 @@ export function EditorView({ job, onNew }: EditorViewProps) {
           musica_fundo: musicaFundo
             ? { path: musicaFundo.path, volume: parseFloat((musicaFundo.volume / 10).toFixed(2)) }
             : undefined,
+          legenda: legendaConfig,
+          legenda_palavras: legendaPalavras.length ? legendaPalavras : undefined,
+          formato,
+          tela_dividida: telaDividida ?? undefined,
+          aula: aulaConfig ?? undefined,
+          narrado: narradoConfig ?? undefined,
+          cta_final: ctaFinal ?? undefined,
         }),
       });
       if (!saveRes.ok) {
@@ -218,69 +382,24 @@ export function EditorView({ job, onNew }: EditorViewProps) {
         throw new Error(errMsg);
       }
 
+      // Dispara o render. A resposta e imediata (202) - o render segue no
+      // servidor, desacoplado desta requisicao. O acompanhamento e por polling.
       const res = await fetch(`/api/jobs/${job.id}/render`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ formatos: formatosRender }),
       });
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         let errMsg = `Erro na renderizacao (${res.status})`;
         try { const d = await res.json(); errMsg = d.error ?? errMsg; } catch { /* noop */ }
         throw new Error(errMsg);
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split("\n\n");
-        buffer = events.pop() ?? "";
-        for (const event of events) {
-          const line = event.replace(/^data:\s*/m, "").trim();
-          if (!line) continue;
-          let msg;
-          try {
-            msg = JSON.parse(line);
-          } catch {
-            continue; // linha incompleta, aguarda o resto do chunk
-          }
-          if (msg.type === "format_start") {
-            setRenderFormatLabel(msg.label);
-            setRenderPhase("bundling");
-            setRenderProgress(null);
-            setRenderLastSeenAt(Date.now());
-          } else if (msg.type === "phase") {
-            setRenderPhase(msg.phase as RenderPhase);
-            setRenderLastSeenAt(Date.now());
-            // Ao entrar em encoding, zera o progresso de frames pra UI nao mostrar
-            // "1800/1800 frames" travado enquanto FFmpeg roda. Se vier Encoded X/Y,
-            // o proximo evento de progress vai atualizar.
-            if (msg.phase === "encoding") {
-              setRenderProgress((prev) => prev ? { ...prev, frames: 0, total: 0, eta: "", phase: "encoding" } : null);
-            }
-          } else if (msg.type === "progress") {
-            setRenderProgress({ frames: msg.frames, total: msg.total, eta: msg.eta, phase: msg.phase as RenderPhase | undefined });
-            if (msg.phase) setRenderPhase(msg.phase as RenderPhase);
-            setRenderLastSeenAt(Date.now());
-          } else if (msg.type === "heartbeat") {
-            if (msg.phase) setRenderPhase(msg.phase as RenderPhase);
-            setRenderLastSeenAt(Date.now());
-          } else if (msg.type === "format_done") {
-            setRenderProgress(null);
-            setRenderPhase("bundling");
-          } else if (msg.type === "done") {
-            setOutputs(msg.outputs ?? { reels: msg.outputPath });
-            setRendering(false);
-            return;
-          } else if (msg.type === "error") {
-            throw new Error(msg.message);
-          }
-        }
-      }
+      setRenderFormatLabel("");
+      setRenderPhase("bundling");
+      setRenderLastSeenAt(Date.now());
+      await acompanharRender();
+      return;
     } catch (err) {
       setRenderError(err instanceof Error ? err.message : String(err));
       setRendering(false);
@@ -315,10 +434,24 @@ export function EditorView({ job, onNew }: EditorViewProps) {
         throw new Error(errMsg);
       }
       const data = await res.json();
-      const novasCenas: Cena[] = data.scenes.cenas;
-      setScenes(novasCenas);
-      setSelectedIdx(0);
-      setRefineToast(`Sequencia refinada ? ${novasCenas.length} cenas`);
+      const s = (data.scenes ?? {}) as Record<string, unknown>;
+      // Formatos com inserts: o refine REGENERA os inserts (não mexe em cenas).
+      // Atualiza o estado do formato certo — senão o editor lia data.scenes.cenas
+      // (vazio na tela dividida) e mostrava "0 cenas" sem trocar os inserts.
+      if (formato === "tela_dividida" && s.tela_dividida) {
+        const cfg = s.tela_dividida as TelaDivididaConfig;
+        setTelaDividida(cfg);
+        setRefineToast(`Inserts regenerados ? ${(cfg.inserts ?? []).length} inserts`);
+      } else if (formato === "narrado" && s.narrado) {
+        const cfg = s.narrado as NarradoConfig;
+        setNarradoConfig(cfg);
+        setRefineToast(`Inserts regenerados ? ${(cfg.inserts ?? []).length} inserts`);
+      } else {
+        const novasCenas: Cena[] = (s.cenas as Cena[]) ?? [];
+        setScenes(novasCenas);
+        setSelectedIdx(0);
+        setRefineToast(`Sequencia refinada ? ${novasCenas.length} cenas`);
+      }
       setTimeout(() => setRefineToast(null), 4000);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
@@ -432,6 +565,47 @@ export function EditorView({ job, onNew }: EditorViewProps) {
         </div>
       )}
 
+      {showLegendaModal && (
+        <div className={styles.refineModalOverlay} onClick={() => setShowLegendaModal(false)}>
+          <div className={styles.refineModal} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.refineModalTitle}>&#9998; Corrigir legenda</div>
+            <p className={styles.refineModalDesc}>
+              Corrija o texto da legenda direto, uma frase por linha. Os tempos sao re-sincronizados sozinhos.
+            </p>
+            <div style={{ maxHeight: 360, overflowY: "auto", padding: "4px 2px", display: "flex", flexDirection: "column", gap: 6 }}>
+              {frasesEdit.map((texto, i) => (
+                <input
+                  key={i}
+                  value={texto}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setFrasesEdit((prev) => prev.map((t, k) => (k === i ? v : t)));
+                  }}
+                  style={{
+                    width: "100%",
+                    background: "rgba(255,255,255,0.06)",
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    borderRadius: 6,
+                    color: "#e9edf3",
+                    padding: "7px 10px",
+                    fontSize: 14,
+                    fontFamily: "inherit",
+                  }}
+                />
+              ))}
+            </div>
+            <div className={styles.refineModalActions}>
+              <button className={styles.refineModalCancel} onClick={() => setShowLegendaModal(false)}>
+                Cancelar
+              </button>
+              <ActionButton onClick={salvarCorrecaoLegenda} icon={"✔"}>
+                Aplicar
+              </ActionButton>
+            </div>
+          </div>
+        </div>
+      )}
+
       <VideoTrimBar
         duration={videoDuration}
         start={videoStartSegundos}
@@ -480,6 +654,165 @@ export function EditorView({ job, onNew }: EditorViewProps) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {temLegendaDisponivel && (
+        <div className={styles.musicaBar}>
+          <span className={styles.musicaLabel}>&#128172; Legenda</span>
+          <select
+            className={styles.musicaSelect}
+            value={legendaOpcao}
+            onChange={(e) => {
+              const op = e.target.value;
+              if (op === "nenhuma") setLegendaConfig({ ...legendaConfig, ativa: false });
+              else setLegendaConfig({ ...legendaConfig, ativa: true, estilo: op as LegendaConfig["estilo"] });
+            }}
+          >
+            <option value="nenhuma">Sem legenda</option>
+            <option value="palavra_unica">Palavra unica</option>
+            <option value="frase_limpa">Frase limpa</option>
+            <option value="dinamica">Dinamica</option>
+          </select>
+          {legendaConfig.ativa && (
+            <>
+              <select
+                className={styles.musicaSelect}
+                value={legendaConfig.cor_destaque === "secundaria" ? "secundaria" : "primaria"}
+                onChange={(e) => setLegendaConfig({ ...legendaConfig, cor_destaque: e.target.value })}
+                title="Cor de destaque (preset dinamica)"
+              >
+                <option value="primaria">Destaque: primaria</option>
+                <option value="secundaria">Destaque: secundaria</option>
+              </select>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+                <input
+                  type="checkbox"
+                  checked={!!legendaConfig.caixa}
+                  onChange={(e) => setLegendaConfig({ ...legendaConfig, caixa: e.target.checked })}
+                />
+                Caixa
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--ink-3)" }} title="Sobe ou desce a legenda (tirar do rosto)">
+                <span>Posicao</span>
+                <input
+                  type="range"
+                  min={-40}
+                  max={40}
+                  step={1}
+                  value={legendaConfig.deslocamento_y ?? 0}
+                  onChange={(e) => setLegendaConfig({ ...legendaConfig, deslocamento_y: Number(e.target.value) })}
+                  style={{ width: 110 }}
+                />
+                <span style={{ width: 34, textAlign: "right" }}>
+                  {(legendaConfig.deslocamento_y ?? 0) > 0 ? "+" : ""}{legendaConfig.deslocamento_y ?? 0}
+                </span>
+              </label>
+              <button type="button" className={styles.btnGhost} onClick={abrirCorrecaoLegenda}>
+                Corrigir texto
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {formato === "tela_dividida" && telaDividida && (
+        <div className={styles.musicaBar}>
+          <span className={styles.musicaLabel}>&#9638; Tela dividida</span>
+          <select
+            className={styles.musicaSelect}
+            value={telaDividida.especialista_posicao}
+            onChange={(e) => setTelaDividida({ ...telaDividida, especialista_posicao: e.target.value as "inicio" | "fim" })}
+            title="Posicao do especialista"
+          >
+            <option value="inicio">Especialista em cima / a esquerda</option>
+            <option value="fim">Especialista embaixo / a direita</option>
+          </select>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--ink-3)" }}>
+            <span>Proporcao</span>
+            <input
+              type="range"
+              min={30}
+              max={70}
+              step={1}
+              value={telaDividida.split_pct}
+              onChange={(e) => setTelaDividida({ ...telaDividida, split_pct: Number(e.target.value) })}
+              style={{ width: 120 }}
+            />
+            <span style={{ width: 46, textAlign: "right" }}>{telaDividida.split_pct}/{100 - telaDividida.split_pct}</span>
+          </label>
+        </div>
+      )}
+
+      {formato === "aula" && aulaConfig && (
+        <div className={styles.musicaBar} style={{ flexWrap: "wrap", gap: 12 }}>
+          <span className={styles.musicaLabel}>&#9636; Aula</span>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <span>Slide comeca (s)</span>
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={aulaConfig.slide_inicio_segundos}
+              onChange={(e) => setAulaConfig({ ...aulaConfig, slide_inicio_segundos: Math.max(0, Number(e.target.value) || 0) })}
+              style={{ width: 64, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 5, color: "#e9edf3", padding: "3px 6px", fontSize: 12 }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <span>Proporcao</span>
+            <input type="range" min={40} max={80} step={1} value={aulaConfig.split_pct}
+              onChange={(e) => setAulaConfig({ ...aulaConfig, split_pct: Number(e.target.value) })} style={{ width: 100 }} />
+            <span style={{ width: 46, textAlign: "right" }}>{aulaConfig.split_pct}/{100 - aulaConfig.split_pct}</span>
+          </label>
+          <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Camera %:</span>
+          {(["x", "y", "w", "h"] as const).map((k) => (
+            <label key={k} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--ink-3)" }}>
+              {k.toUpperCase()}
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={0.5}
+                value={Math.round(aulaConfig.camera_regiao[k] * 1000) / 10}
+                onChange={(e) => setAulaConfig({ ...aulaConfig, camera_regiao: { ...aulaConfig.camera_regiao, [k]: Math.min(1, Math.max(0, (Number(e.target.value) || 0) / 100)) } })}
+                style={{ width: 56, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 5, color: "#e9edf3", padding: "3px 6px", fontSize: 12 }}
+              />
+            </label>
+          ))}
+        </div>
+      )}
+
+      {ctaFinal && (
+        <div className={styles.musicaBar} style={{ flexWrap: "wrap", gap: 12 }}>
+          <span className={styles.musicaLabel}>&#9873; CTA final</span>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <input type="checkbox" checked={!!ctaFinal.ativo} onChange={(e) => setCtaFinal({ ...ctaFinal, ativo: e.target.checked })} />
+            Ativo
+          </label>
+          <input
+            type="text"
+            placeholder="Copy do CTA (ex: Garanta sua vaga no evento)"
+            value={ctaFinal.copy}
+            onChange={(e) => setCtaFinal({ ...ctaFinal, copy: e.target.value })}
+            style={{ flex: "1 1 260px", minWidth: 200, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 6, color: "#e9edf3", padding: "6px 10px", fontSize: 13 }}
+          />
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <span>Duracao (s)</span>
+            <input
+              type="number"
+              min={1}
+              max={12}
+              step={0.5}
+              value={ctaFinal.duracao_segundos}
+              onChange={(e) => setCtaFinal({ ...ctaFinal, duracao_segundos: Math.min(12, Math.max(1, Number(e.target.value) || 4)) })}
+              style={{ width: 60, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 5, color: "#e9edf3", padding: "3px 6px", fontSize: 12 }}
+            />
+          </label>
+          <label className={styles.btnGhost} style={{ cursor: "pointer" }}>
+            {ctaFinal.logo_url ? "Trocar logo" : "Enviar logo"}
+            <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadLogo(f); }} />
+          </label>
+          {ctaFinal.logo_url ? <span style={{ fontSize: 12, color: "var(--ink-3)" }}>logo &#10003;</span> : null}
         </div>
       )}
 
@@ -750,8 +1083,13 @@ function RenderingScreen({
 }) {
   const [now, setNow] = useState(Date.now());
 
-  // Tick a cada 500ms para detectar quando o servidor para de enviar eventos
-  // (heartbeat ou progress). Se passar mais que 8s, mostra aviso de stall.
+  // Tick a cada 500ms so para atualizar o contador de "ultimo sinal". O valor
+  // comparado e o updatedAt do proprio render-status.json, ou seja, quando o
+  // RENDER escreveu pela ultima vez - nao quando o poll chegou.
+  //
+  // Limiar de 60s (era 8s): o bundling do Remotion fica legitimamente calado
+  // por dezenas de segundos, e com polling um poll perdido nao significa mais
+  // nada. So avisa quando o processo realmente parou de dar sinal.
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(t);
@@ -761,7 +1099,7 @@ function RenderingScreen({
   const temProgresso = progress && progress.total > 0 && phaseInfo.mostraBarra;
   const pct = temProgresso ? Math.round((progress!.frames / progress!.total) * 100) : 0;
   const segundosDesdeUltimoEvento = lastSeenAt > 0 ? Math.floor((now - lastSeenAt) / 1000) : 0;
-  const stallSuspeito = lastSeenAt > 0 && segundosDesdeUltimoEvento > 8;
+  const stallSuspeito = lastSeenAt > 0 && segundosDesdeUltimoEvento > 60;
 
   return (
     <main className={styles.renderScreen}>
@@ -836,9 +1174,9 @@ function RenderingScreen({
             textAlign: "center",
           }}>
             {stallSuspeito
-              ? `Sem resposta do servidor ha ${segundosDesdeUltimoEvento}s — pode ter travado.`
-              : segundosDesdeUltimoEvento === 0
-              ? "Recebendo dados do servidor"
+              ? `O render nao da sinal ha ${segundosDesdeUltimoEvento}s. Ele continua rodando no servidor mesmo se voce fechar esta aba — reabra o job depois para ver o resultado.`
+              : segundosDesdeUltimoEvento <= 1
+              ? "Acompanhando o render no servidor — pode fechar esta aba"
               : `Ultimo sinal ha ${segundosDesdeUltimoEvento}s`}
           </div>
         )}

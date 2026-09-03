@@ -9,5 +9,5 @@
  * transpiler nativo do Node 22 para .ts.
  */
 
-export { analyze, refine, AnalysisError } from "../../../../services/analysis/src/claude";
-export type { AnalyzeParams, AnalyzeResult, RefineParams } from "../../../../services/analysis/src/claude";
+export { analyze, refine, AnalysisError, planejarInserts } from "../../../../services/analysis/src/claude";
+export type { AnalyzeParams, AnalyzeResult, RefineParams, PlanejarInsertsParams } from "../../../../services/analysis/src/claude";
