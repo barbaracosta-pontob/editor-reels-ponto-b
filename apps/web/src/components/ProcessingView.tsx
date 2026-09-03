@@ -14,7 +14,16 @@ type ProcessingStep = "transcribing" | "analyzing" | "ready";
 
 // ── ProcessingView ────────────────────────────────────────────────────────────
 
-export function ProcessingView({ fileName, step }: { fileName: string; step: ProcessingStep }) {
+export function ProcessingView({
+  fileName,
+  step,
+  transcriptCached = false,
+}: {
+  fileName: string;
+  step: ProcessingStep;
+  /** true quando o transcript veio do cache e o Whisper foi pulado. */
+  transcriptCached?: boolean;
+}) {
   const current = Math.max(0, STEPS.findIndex((s) => s.key === step));
 
   return (
@@ -56,7 +65,11 @@ export function ProcessingView({ fileName, step }: { fileName: string; step: Pro
                   <div className={`${styles.stepLabel} ${done ? styles.done : active ? styles.active : ""}`}>
                     {s.label}
                   </div>
-                  <div className={styles.stepDetail}>{s.detail}</div>
+                  <div className={styles.stepDetail}>
+                    {s.key === "transcribing" && transcriptCached
+                      ? "Transcrição reaproveitada do cache — Whisper pulado"
+                      : s.detail}
+                  </div>
                 </div>
                 {done && <span className={styles.stepBadgeDone}>OK</span>}
                 {active && <span className={styles.stepBadgeActive}>Em andamento</span>}

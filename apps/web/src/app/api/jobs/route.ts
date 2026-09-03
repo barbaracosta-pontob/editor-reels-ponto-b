@@ -8,7 +8,7 @@
 import { NextRequest } from "next/server";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { writeFile, mkdir, readFile } from "node:fs/promises";
+import { writeFile, mkdir, readFile, copyFile } from "node:fs/promises";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -32,6 +32,21 @@ const PYTHON = path.join(
     : "services/transcription/.venv/bin/python"
 );
 const TRANSCRIBE_SCRIPT = path.join(REPO_ROOT, "services/transcription/run.py");
+
+// Cache de transcricoes, indexado por hash do arquivo de video + modelo do
+// Whisper.
+//
+// Motivo: a transcricao e a etapa cara do pipeline (5-8 min num video de 45s
+// em 1080p). Se qualquer etapa POSTERIOR falhar - a chamada ao LLM sem saldo
+// na API, por exemplo - o job inteiro e descartado e o Whisper roda de novo do
+// zero no retry, mesmo sendo exatamente o mesmo arquivo. Com o cache, o retry
+// e instantaneo.
+//
+// Fica na RAIZ do repo, fora de JOBS_DIR, de proposito: os jobs sao isolados
+// por instancia (jobs-instance2, jobs-instance3...), mas nao ha razao para
+// transcrever o mesmo arquivo de novo so porque ele foi aberto noutra
+// instancia. O cache e conteudo-enderecado, entao compartilhar e seguro.
+const TRANSCRIPT_CACHE_DIR = path.join(REPO_ROOT, ".transcript-cache");
 
 function sseEvent(data: unknown): string {
   return `data: ${JSON.stringify(data)}\n\n`;
@@ -81,19 +96,43 @@ export async function POST(req: NextRequest) {
         const videoBuffer = Buffer.from(await videoFile.arrayBuffer());
         await writeFile(videoPath, videoBuffer);
 
-        // --- ETAPA 1: Transcricao ---
-        emit({ type: "step", step: "transcribing" });
-
+        // --- ETAPA 1: Transcricao (com cache por hash do video) ---
+        const whisperModel = process.env.WHISPER_MODEL ?? "large-v3";
+        // O modelo entra na chave: trocar de modelo tem que invalidar o cache,
+        // senao um upgrade de qualidade nunca surtiria efeito em video repetido.
+        const cacheKey = crypto
+          .createHash("sha256")
+          .update(videoBuffer)
+          .update(`|${whisperModel}`)
+          .digest("hex");
+        const cachePath = path.join(TRANSCRIPT_CACHE_DIR, `${cacheKey}.json`);
         const transcriptPath = path.join(jobDir, "transcript.json");
-        const pythonBin = existsSync(PYTHON) ? PYTHON : "python3";
+        const transcriptEmCache = existsSync(cachePath);
 
-        await execFileAsync(pythonBin, [
-          TRANSCRIBE_SCRIPT,
-          "--input", videoPath,
-          "--output", transcriptPath,
-          "--model", process.env.WHISPER_MODEL ?? "large-v3",
-          "--device", process.env.WHISPER_DEVICE ?? "auto",
-        ]);
+        emit({ type: "step", step: "transcribing", cached: transcriptEmCache });
+
+        if (transcriptEmCache) {
+          await copyFile(cachePath, transcriptPath);
+          console.log(`[POST /api/jobs] transcricao reaproveitada do cache (${cacheKey.slice(0, 12)})`);
+        } else {
+          const pythonBin = existsSync(PYTHON) ? PYTHON : "python3";
+
+          await execFileAsync(pythonBin, [
+            TRANSCRIBE_SCRIPT,
+            "--input", videoPath,
+            "--output", transcriptPath,
+            "--model", whisperModel,
+            "--device", process.env.WHISPER_DEVICE ?? "auto",
+          ]);
+
+          // Guarda no cache. Best-effort: falha aqui nao pode derrubar o job.
+          try {
+            await mkdir(TRANSCRIPT_CACHE_DIR, { recursive: true });
+            await copyFile(transcriptPath, cachePath);
+          } catch (e) {
+            console.warn("[POST /api/jobs] nao foi possivel gravar o cache de transcricao:", e);
+          }
+        }
 
         const transcript = JSON.parse(await readFile(transcriptPath, "utf-8"));
 
@@ -328,8 +367,14 @@ export async function POST(req: NextRequest) {
         console.error("[POST /api/jobs]", err);
         const raw = err instanceof Error ? err.message : String(err);
         // Erros de autenticação da Anthropic (AuthenticationError)
+        const low = raw.toLowerCase();
         const message =
-          raw.includes("401") || raw.toLowerCase().includes("authentication") || raw.toLowerCase().includes("api key")
+          // 400 invalid_request_error da Anthropic quando a workspace ficou sem
+          // credito. Vinha como blob de JSON cru na tela porque so 401/429/529
+          // tinham tratamento.
+          low.includes("credit balance") || low.includes("plans & billing") || low.includes("purchase credits")
+            ? "A API da Anthropic esta sem saldo. Adicione creditos em Plans & Billing no console da Anthropic e tente de novo. A transcricao deste video ficou em cache — o retry nao vai reprocessar o video."
+            : raw.includes("401") || raw.toLowerCase().includes("authentication") || raw.toLowerCase().includes("api key")
             ? "Chave de API inválida ou ausente. Verifique o valor de ANTHROPIC_API_KEY no arquivo .env e reinicie o servidor."
             : raw.includes("529") || raw.toLowerCase().includes("overloaded")
             ? "A API da Anthropic está sobrecarregada. Aguarde alguns segundos e tente novamente."

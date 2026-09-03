@@ -89,3 +89,6 @@ exports/
 
 # Quarentena local de arquivos que a ponte nao consegue apagar
 _to_delete/
+
+# Cache de transcricoes do Whisper (conteudo-enderecado, reconstruivel)
+.transcript-cache/

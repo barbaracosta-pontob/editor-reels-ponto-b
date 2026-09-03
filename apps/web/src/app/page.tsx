@@ -42,6 +42,8 @@ export default function Home() {
   const [especialistas, setEspecialistas] = useState<EspecialistaItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [processingStep, setProcessingStep] = useState<ProcessingStep>("transcribing");
+  // Sinalizado pelo servidor quando a transcricao veio do cache (Whisper pulado).
+  const [transcriptCached, setTranscriptCached] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
@@ -75,6 +77,7 @@ export default function Home() {
       formData.append("legenda", JSON.stringify({ ativa: true, estilo: legendaOpcao }));
     }
     setProcessingStep("transcribing");
+    setTranscriptCached(false);
     setScreen("processing");
     try {
       const res = await fetch("/api/jobs", { method: "POST", body: formData });
@@ -99,6 +102,7 @@ export default function Home() {
           }
           if (msg.type === "step") {
             setProcessingStep(msg.step as ProcessingStep);
+            if (msg.step === "transcribing") setTranscriptCached(!!msg.cached);
           } else if (msg.type === "done") {
             setJob(msg.job as Job);
             setScreen("editor");
@@ -122,9 +126,10 @@ export default function Home() {
     setBrief("");
     setJob(null);
     setProcessingStep("transcribing");
+    setTranscriptCached(false);
   }
 
-  if (screen === "processing") return <ProcessingView fileName={file?.name ?? ""} step={processingStep} />;
+  if (screen === "processing") return <ProcessingView fileName={file?.name ?? ""} step={processingStep} transcriptCached={transcriptCached} />;
   if (screen === "editor" && job) return <EditorView job={job} onNew={handleNew} />;
 
   return (
@@ -172,8 +177,18 @@ export default function Home() {
       <div className={styles.rightPanel}>
 
         <div className={styles.formHeading}>
-          <h2 className={styles.formTitle}>Novo vídeo</h2>
-          <p className={styles.formSubtitle}>Configure e submeta o vídeo para processamento</p>
+          <div className={styles.formHeadingRow}>
+            <div>
+              <h2 className={styles.formTitle}>Novo vídeo</h2>
+              <p className={styles.formSubtitle}>Configure e submeta o vídeo para processamento</p>
+            </div>
+            {/* Atalho para /jobs: a pagina ja existia, mas so era alcancavel
+                digitando a URL. Daqui da pra reabrir um job ja processado no
+                editor sem refazer transcricao e analise. */}
+            <Link href="/jobs" className={styles.jobsLink}>
+              Jobs processados →
+            </Link>
+          </div>
         </div>
 
         {/* Drop zone */}

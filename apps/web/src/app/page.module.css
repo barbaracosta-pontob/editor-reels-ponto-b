@@ -176,6 +176,34 @@
   color: var(--ink-3);
 }
 
+/* Linha do cabecalho do formulario: titulo a esquerda, atalho para /jobs a
+   direita. Alinhado pelo topo para o link acompanhar o titulo, nao o subtitulo. */
+.formHeadingRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.jobsLink {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-decoration: none;
+  white-space: nowrap;
+  padding: 6px 12px;
+  border: 1px solid var(--b-soft);
+  border-radius: var(--r-md);
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.jobsLink:hover {
+  color: var(--ink);
+  border-color: var(--b-strong);
+  background: var(--surface-float);
+}
+
 /* ── Drop zone ────────────────────────────────────────────────── */
 
 .dropzone {
