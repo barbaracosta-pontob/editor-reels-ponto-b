@@ -24,32 +24,47 @@ const nextConfig = {
     if (dev) {
       // O watcher do webpack observa o repo inteiro, e o pipeline escreve MUITO
       // dentro dele durante um render: jobs/<id>/render-status.json e reescrito
-      // a cada ~400ms (mais de 2000 vezes num render de 15 min), mais o
-      // render-<fmt>.log, os mp4 de saida e os inserts baixados.
+      // a cada ~800ms, mais o render-<fmt>.log, os mp4 de saida e os inserts.
       //
-      // Cada uma dessas escritas acorda o watcher. O resultado era recompilacao
-      // continua durante o render e, quando o Fast Refresh nao conseguia aplicar
-      // a quente, um RELOAD COMPLETO do navegador - que jogava o usuario de volta
-      // para a home no meio da exportacao, porque o job aberto vive so na memoria
-      // do React. O aviso "Fast Refresh had to perform a full reload" no console
-      // e o sintoma.
+      // Cada escrita acorda o watcher. O resultado era recompilacao continua
+      // durante o render e, quando o Fast Refresh nao conseguia aplicar a
+      // quente, um RELOAD COMPLETO do navegador - que jogava o usuario de volta
+      // para a home no meio da exportacao. Nada aqui e codigo-fonte: e tudo dado
+      // de trabalho, entao ignorar e seguro.
       //
-      // Nada aqui e codigo-fonte: sao dados de trabalho. Ignorar e seguro e tira
-      // o render do caminho do watcher.
-      const ignorados = [
-        "**/.git/**",
-        "**/node_modules/**",
-        path.resolve(__dirname, "../../jobs/**"),
-        path.resolve(__dirname, "../../jobs-instance*/**"),
-        path.resolve(__dirname, "../../.transcript-cache/**"),
-        path.resolve(__dirname, "../../exports/**"),
-        path.resolve(__dirname, "../../_to_delete/**"),
+      // ATENCAO AO FORMATO DOS PADROES (bug de 2026-09-04):
+      // o watchpack converte cada string de `ignored` em RegExp tratando-a como
+      // glob POSIX. Um caminho do Windows vindo de path.resolve() chega com
+      // barras invertidas, que viram escapes na regex:
+      //   C:\Repos\...\jobs\**  ->  /^C:\Repos\...\jobs\([^/]*)$/
+      // O `\(` deixa de abrir grupo e a expressao estoura com "Unmatched ')'",
+      // em TODA chamada de watch: uncaughtException em rajada, e o ignore nunca
+      // chega a valer. Por isso a normalizacao para barras normais abaixo -
+      // ela nao e cosmetica.
+      const raizPosix = path.resolve(__dirname, "../..").replace(/\\/g, "/");
+      const pastasDeTrabalho = [
+        `${raizPosix}/jobs/**`,
+        `${raizPosix}/jobs-instance*/**`,
+        `${raizPosix}/.transcript-cache/**`,
+        `${raizPosix}/exports/**`,
+        `${raizPosix}/_to_delete/**`,
       ];
+
+      // Preserva o que o Next ja ignorava (.git, node_modules, .next) em vez de
+      // substituir. So acrescenta quando o valor existente e uma lista de
+      // strings; se for funcao ou RegExp, mistura-los num array seria invalido,
+      // entao nesse caso deixamos o do Next em paz e nao aplicamos o nosso.
+      const anterior = config.watchOptions?.ignored;
+      const base = typeof anterior === "string"
+        ? [anterior]
+        : Array.isArray(anterior) && anterior.every((x) => typeof x === "string")
+          ? anterior
+          : null;
+
       config.watchOptions = {
         ...config.watchOptions,
-        ignored: ignorados,
-        // Junta rajadas de eventos numa recompilacao so, em vez de uma por
-        // arquivo tocado.
+        ...(base ? { ignored: [...base, ...pastasDeTrabalho] } : {}),
+        // Junta rajadas de eventos numa recompilacao so.
         aggregateTimeout: 400,
       };
     }
