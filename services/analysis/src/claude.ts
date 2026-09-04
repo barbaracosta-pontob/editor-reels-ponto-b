@@ -4,6 +4,34 @@ import { ZodError } from "zod";
 import { ReelPropsSchema, type ReelProps, PlanoInsertsSchema, type InsertPlanoItem } from "@pontob/schema";
 import { SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT, buildUserPrompt, buildRefinePrompt, PROMPT_VERSION, SYSTEM_PROMPT_INSERTS, buildInsertPrompt } from "./prompt";
 
+/**
+ * Prompt caching: campos que a API aceita e o SDK instalado ainda nao tipa.
+ *
+ * O @anthropic-ai/sdk esta pinado em 0.32.x, versao em que o prompt caching era
+ * beta e vivia em `client.beta.promptCaching`. Depois virou GA no endpoint
+ * normal de messages — que e o que este arquivo usa, e funciona em runtime —
+ * mas os tipos daquela versao nao conhecem `cache_control` nem os contadores de
+ * cache em `usage`.
+ *
+ * Sem isto o `tsc` acusava 6 erros que NAO correspondiam a bug nenhum. E um
+ * typecheck sujo por padrao e pior que nenhum: foi com ele sujo que o TS2448 do
+ * comCaixinha passou e virou erro em tela.
+ *
+ * Declara so o que a API aceita/devolve, como opcional. Zero efeito em runtime.
+ * REMOVER ao subir o SDK para >= 0.40, onde esses campos ja vem tipados.
+ */
+declare module "@anthropic-ai/sdk/resources/messages" {
+  interface TextBlockParam {
+    cache_control?: { type: "ephemeral" } | null;
+  }
+  interface Usage {
+    /** Tokens lidos do cache (nao cobrados como input cheio). */
+    cache_read_input_tokens?: number | null;
+    /** Tokens gravados no cache nesta chamada. */
+    cache_creation_input_tokens?: number | null;
+  }
+}
+
 const DEFAULT_MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6";
 // O prompt pede um bloco <analise>/<diagnostico> extenso (chain-of-thought) ANTES do JSON.
 // Esse raciocinio sozinho consome ~2.5-3k tokens; somado ao JSON de 9-15 cenas, 4096 estoura
@@ -102,7 +130,10 @@ function stripAnalysisBlock(text: string): string {
 // + start_segundos da cena com vídeo que inicia o "relógio"), depois verifica
 // se startCTA + duracaoCTA cobre fimUltimaFala + buffer.
 
-type SegLike = { start: number; end: number };
+// Segmento do Whisper. `text` e opcional de proposito: nem todo produtor de
+// transcript preenche (alguns so trazem os tempos), e a busca por palavras de
+// CTA abaixo precisa sobreviver a isso.
+type SegLike = { start: number; end: number; text?: string };
 
 function corrigirCoberturaCta(scenes: ReelProps, transcript: object): ReelProps {
   const t = transcript as Record<string, unknown>;
@@ -128,7 +159,7 @@ function corrigirCoberturaCta(scenes: ReelProps, transcript: object): ReelProps 
     // Procura o segmento mais cedo que contém palavras típicas de CTA
     const ctaKeywords = ["clique", "coment", "garanta", "acesse", "inscreva", "aperte", "arrasta", "link"];
     for (let i = 0; i < segs.length; i++) {
-      const text = segs[i].text.toLowerCase();
+      const text = (segs[i].text ?? "").toLowerCase();
       if (ctaKeywords.some(k => text.includes(k))) return i;
     }
     // fallback: dois últimos segmentos
