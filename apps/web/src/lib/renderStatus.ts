@@ -19,7 +19,7 @@ import { readFile, writeFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-export type RenderPhase = "bundling" | "rendering" | "encoding";
+export type RenderPhase = "queued" | "bundling" | "rendering" | "encoding";
 export type RenderState = "running" | "done" | "error";
 
 export interface RenderStatus {
@@ -31,6 +31,8 @@ export interface RenderStatus {
   /** Label amigavel do formato atual ("9:16 Reels"). */
   formatLabel?: string;
   phase: RenderPhase;
+  /** Texto explicando a espera quando phase === "queued". */
+  filaInfo?: string;
   frames: number;
   total: number;
   eta: string;

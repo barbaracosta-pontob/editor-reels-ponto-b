@@ -50,7 +50,7 @@ const TIPO_COLORS: Record<string, string> = {
 
 const FPS = 30;
 
-type RenderPhase = "bundling" | "rendering" | "encoding";
+type RenderPhase = "queued" | "bundling" | "rendering" | "encoding";
 type RenderProgress = { frames: number; total: number; eta: string; phase?: RenderPhase };
 
 function getPreview(cena: Cena): string {
@@ -75,6 +75,7 @@ export function EditorView({ job, onNew }: EditorViewProps) {
   const [renderFormatLabel, setRenderFormatLabel] = useState<string>("");
   const [renderPhase, setRenderPhase] = useState<RenderPhase>("bundling");
   const [renderLastSeenAt, setRenderLastSeenAt] = useState<number>(0);
+  const [renderFilaInfo, setRenderFilaInfo] = useState<string>("");
   const [outputs, setOutputs] = useState<Record<string, string> | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [formatosRender, setFormatosRender] = useState<string[]>(["reels"]);
@@ -286,6 +287,7 @@ export function EditorView({ job, onNew }: EditorViewProps) {
         let st: {
           status: "idle" | "running" | "done" | "error";
           phase?: RenderPhase;
+          filaInfo?: string;
           frames?: number;
           total?: number;
           eta?: string;
@@ -305,6 +307,7 @@ export function EditorView({ job, onNew }: EditorViewProps) {
         if (st.status === "idle") continue;
 
         setRenderPhase(st.phase ?? "bundling");
+        setRenderFilaInfo(st.filaInfo ?? "");
         setRenderFormatLabel(st.formatLabel ?? "");
         setRenderProgress(
           (st.total ?? 0) > 0
@@ -344,6 +347,7 @@ export function EditorView({ job, onNew }: EditorViewProps) {
         setRendering(true);
         setRenderFormatLabel(st.formatLabel ?? "");
         setRenderPhase(st.phase ?? "bundling");
+        setRenderFilaInfo(st.filaInfo ?? "");
         setRenderLastSeenAt(st.updatedAt ?? Date.now());
         void acompanharRender();
       } catch { /* sem render em andamento */ }
@@ -472,7 +476,7 @@ export function EditorView({ job, onNew }: EditorViewProps) {
     }
   }
 
-  if (rendering) return <RenderingScreen progress={renderProgress} formatLabel={renderFormatLabel} phase={renderPhase} lastSeenAt={renderLastSeenAt} />;
+  if (rendering) return <RenderingScreen progress={renderProgress} formatLabel={renderFormatLabel} phase={renderPhase} filaInfo={renderFilaInfo} lastSeenAt={renderLastSeenAt} />;
   if (refining) return <RefiningScreen />;
   if (outputs) return <SuccessScreen jobId={job.id} outputs={outputs} onNew={onNew} />;
 
@@ -1163,6 +1167,7 @@ function VideoTrimBar({
 // ?? RenderingScreen ???????????????????????????????????????????????????????????
 
 const PHASE_DESC: Record<RenderPhase, { titulo: string; descricao: string; mostraBarra: boolean }> = {
+  queued:    { titulo: "Na fila",                     descricao: "A maquina renderiza um projeto por vez.",   mostraBarra: false },
   bundling:  { titulo: "Preparando componentes",     descricao: "Compilando React e carregando assets.",   mostraBarra: false },
   rendering: { titulo: "Renderizando frames",         descricao: "Cada frame e gerado pelo Chromium.",       mostraBarra: true  },
   encoding:  { titulo: "Combinando em MP4",           descricao: "O FFmpeg esta juntando audio e video. Pode levar de 10s a 1min.", mostraBarra: true  },
@@ -1172,11 +1177,13 @@ function RenderingScreen({
   progress,
   formatLabel,
   phase,
+  filaInfo,
   lastSeenAt,
 }: {
   progress: RenderProgress | null;
   formatLabel?: string;
   phase: RenderPhase;
+  filaInfo?: string;
   lastSeenAt: number;
 }) {
   const [now, setNow] = useState(Date.now());
@@ -1193,27 +1200,31 @@ function RenderingScreen({
     return () => clearInterval(t);
   }, []);
 
+  const naFila = phase === "queued";
   const phaseInfo = PHASE_DESC[phase];
   const temProgresso = progress && progress.total > 0 && phaseInfo.mostraBarra;
   const pct = temProgresso ? Math.round((progress!.frames / progress!.total) * 100) : 0;
   const segundosDesdeUltimoEvento = lastSeenAt > 0 ? Math.floor((now - lastSeenAt) / 1000) : 0;
-  const stallSuspeito = lastSeenAt > 0 && segundosDesdeUltimoEvento > 60;
+  const stallSuspeito = !naFila && lastSeenAt > 0 && segundosDesdeUltimoEvento > 60;
 
   return (
     <main className={styles.renderScreen}>
       <div className={styles.renderCard}>
         <div className={styles.renderHeading}>
-          <h2 className={styles.renderTitle}>Renderizando</h2>
+          <h2 className={styles.renderTitle}>{naFila ? "Na fila" : "Renderizando"}</h2>
           <p className={styles.renderSubtitle}>
-            {formatLabel ? `Formato ${formatLabel} — ` : ""}{phaseInfo.descricao}
+            {naFila
+              ? (filaInfo || phaseInfo.descricao)
+              : <>{formatLabel ? `Formato ${formatLabel} — ` : ""}{phaseInfo.descricao}</>}
           </p>
         </div>
 
         {/* Indicador de fases */}
         <div style={{ display: "flex", gap: 8, marginBottom: 16, justifyContent: "center" }}>
-          {(["bundling", "rendering", "encoding"] as RenderPhase[]).map((p) => {
-            const order = { bundling: 0, rendering: 1, encoding: 2 };
-            const atual = order[phase];
+          {(["bundling", "rendering", "encoding"] as const).map((p) => {
+            const order = { bundling: 0, rendering: 1, encoding: 2 } as const;
+            // "queued" fica ANTES de tudo: -1 deixa as tres etapas pendentes.
+            const atual = phase === "queued" ? -1 : order[phase];
             const este = order[p];
             const estado = este < atual ? "feito" : este === atual ? "ativo" : "pendente";
             return (

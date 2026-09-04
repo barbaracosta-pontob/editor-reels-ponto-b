@@ -32,6 +32,7 @@ import {
 } from "@/lib/renderStatus";
 
 import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
+import { adquirirLock } from "@/lib/renderLock";
 const REMOTION_DIR = path.join(REPO_ROOT, "apps/remotion");
 
 // Remotion passa por 3 fases distintas durante o render. Cada uma emite
@@ -122,14 +123,21 @@ const FORMAT_CONFIG = {
 type FormatKey = keyof typeof FORMAT_CONFIG;
 
 /**
- * Sobe a prioridade do processo de render (e de toda a arvore de filhos: node,
- * chrome headless, ffmpeg) no Windows.
+ * Ajusta a prioridade do processo de render no Windows.
  *
  * POR QUE: o render roda numa janela de console em segundo plano. O Windows 11
  * empurra processos de segundo plano para EcoQoS ("Modo de eficiencia") quando
- * a maquina fica ociosa - clock reduzido e, em CPU hibrida, execucao nos nucleos
- * de eficiencia. E a explicacao mais provavel para a sensacao de que o render
- * anda mais rapido com alguem mexendo no computador.
+ * a maquina fica ociosa - clock reduzido e execucao nos nucleos de eficiencia.
+ *
+ * POR QUE MUDOU (2026-09-04): a versao anterior colocava a ARVORE INTEIRA em
+ * AboveNormal - o log mostrou "prioridade AboveNormal aplicada a 29 processo(s)".
+ * Numa maquina de 2 nucleos fisicos isso nao cria CPU: so garante que os 29
+ * processos do render ganhem da thread do proprio Next, que e quem serve os mp4
+ * dos inserts PARA o render e responde o /render/status. O sintoma foi
+ * /render/status levando 16569ms para ler um JSON de 500 bytes.
+ *
+ * Agora: a arvore vai para `Normal` (o suficiente para escapar do EcoQoS, sem
+ * passar na frente do dev server) e so o processo raiz fica em AboveNormal.
  *
  * Best-effort de proposito: se o PowerShell nao existir, se faltar permissao ou
  * se a arvore ja tiver mudado, nao acontece nada e o render segue normal. Nunca
@@ -141,18 +149,21 @@ function priorizarArvore(pid: number, jobId: string): void {
     return;
   }
   // No Windows spawn usa shell: true, entao `pid` e o cmd.exe - os processos que
-  // interessam sao os descendentes. Espera alguns segundos para a arvore existir
-  // e entao sobe todo mundo de uma vez via CIM.
+  // interessam sao os descendentes. Espera alguns segundos para a arvore existir.
   setTimeout(() => {
     const ps = [
       "$ErrorActionPreference='SilentlyContinue';",
-      `$alvo=@(${pid});`,
+      `$raiz=${pid};`,
+      "$alvo=@($raiz);",
       "for($i=0;$i -lt 4;$i++){",
       "  $filhos=Get-CimInstance Win32_Process | Where-Object { $alvo -contains $_.ParentProcessId } | ForEach-Object { $_.ProcessId };",
       "  if(-not $filhos){break};",
       "  $alvo+=$filhos",
       "};",
-      "foreach($p in $alvo){ try { (Get-Process -Id $p).PriorityClass='AboveNormal' } catch {} };",
+      // Arvore inteira em Normal: tira do EcoQoS sem competir com o Next.
+      "foreach($p in $alvo){ try { (Get-Process -Id $p).PriorityClass='Normal' } catch {} };",
+      // So a raiz fica acima do normal.
+      "try { (Get-Process -Id $raiz).PriorityClass='AboveNormal' } catch {};",
       "Write-Output $alvo.Count",
     ].join(" ");
     execFile("powershell", ["-NoProfile", "-Command", ps], (err, stdout) => {
@@ -160,7 +171,7 @@ function priorizarArvore(pid: number, jobId: string): void {
         console.warn(`[render ${jobId}] nao foi possivel ajustar a prioridade:`, err.message);
         return;
       }
-      console.log(`[render ${jobId}] prioridade AboveNormal aplicada a ${String(stdout).trim()} processo(s)`);
+      console.log(`[render ${jobId}] prioridade Normal aplicada a ${String(stdout).trim()} processo(s); raiz em AboveNormal`);
     });
   }, 8000);
 }
@@ -191,7 +202,7 @@ async function executarRender(
   const status: RenderStatus = {
     status: "running",
     formatos,
-    phase: "bundling",
+    phase: "queued",
     frames: 0,
     total: 0,
     eta: "",
@@ -218,6 +229,21 @@ async function executarRender(
     }
   }
 
+  await flush(true);
+
+  // FILA SERIAL: espera a vez antes de gastar CPU. Ver lib/renderLock.ts para o
+  // motivo. Enquanto espera, continua escrevendo o status (phase "queued") — sem
+  // isso a UI acharia que o render travou e mostraria o aviso de stall.
+  const liberarLock = await adquirirLock(jobId, ({ donoJobId, esperandoHa }) => {
+    status.phase = "queued";
+    status.filaInfo = donoJobId && donoJobId !== jobId
+      ? `Aguardando o render do job ${donoJobId.slice(0, 8)} terminar (${esperandoHa}s na fila).`
+      : `Aguardando outro render terminar (${esperandoHa}s na fila).`;
+    void flush();
+  });
+
+  status.filaInfo = undefined;
+  status.phase = "bundling";
   await flush(true);
 
   try {
@@ -372,6 +398,7 @@ async function executarRender(
     status.error = String(err);
     await flush(true);
   } finally {
+    liberarLock();
     emAndamento.delete(jobId);
   }
 }
@@ -437,7 +464,7 @@ export async function POST(
     formatos,
     format: formatos[0],
     formatLabel: FORMAT_CONFIG[formatos[0]].label,
-    phase: "bundling",
+    phase: "queued",
     frames: 0,
     total: 0,
     eta: "",

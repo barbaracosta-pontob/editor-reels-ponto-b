@@ -95,3 +95,9 @@ _to_delete/
 
 # Saida do diagnostico de hardware (especifica de cada maquina)
 scripts/diagnostico-maquina.txt
+
+# Lock da fila serial de render (estado local da maquina)
+.render-lock.json
+
+# Saidas do teste de GL (scripts/teste-gl.mjs)
+gl-test-*.mp4

@@ -16,7 +16,9 @@
     "render": "npm run render --workspace=@pontob/remotion",
     "transcribe": "python services/transcription/run.py",
     "analyze": "npm run analyze --workspace=@pontob/analysis",
-    "test:parity": "vitest run tests/parity"
+    "test:parity": "vitest run tests/parity",
+    "teste:gl": "node scripts/teste-gl.mjs",
+    "typecheck": "tsc --noEmit -p apps/web/tsconfig.json"
   },
   "engines": {
     "node": ">=20.0.0"
