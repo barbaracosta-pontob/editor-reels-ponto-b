@@ -37,7 +37,7 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [brief, setBrief] = useState("");
   const [especialistaSlug, setEspecialistaSlug] = useState("generico");
-  const [formato, setFormato] = useState<"cenas" | "tela_dividida" | "aula" | "narrado">("cenas");
+  const [formato, setFormato] = useState<"cenas" | "tela_dividida" | "aula" | "narrado" | "caixinha_pergunta">("cenas");
   const [legendaOpcao, setLegendaOpcao] = useState<"nenhuma" | "palavra_unica" | "frase_limpa" | "dinamica">("nenhuma");
   const [especialistas, setEspecialistas] = useState<EspecialistaItem[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -270,11 +270,12 @@ export default function Home() {
               <option value="tela_dividida">Tela dividida (especialista + inserts)</option>
               <option value="aula">Aula (slide + especialista)</option>
               <option value="narrado">Narrado (voz + inserts em tela cheia)</option>
+              <option value="caixinha_pergunta">Caixinha de pergunta (especialista + sticker)</option>
             </select>
             <span className={styles.selectArrow}>▾</span>
           </div>
           <div className={styles.fieldHint}>
-            Tela dividida busca imagens do tema (Pexels). Aula usa a gravação com slide + câmera.
+            Tela dividida busca imagens do tema (Pexels). Aula usa a gravação com slide + câmera. Caixinha de pergunta reproduz o sticker do Instagram — a pergunta é escrita no editor.
           </div>
         </div>
 

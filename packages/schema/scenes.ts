@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { LegendaConfigSchema, LegendaPalavraSchema } from "./captions";
-import { FORMATOS, TelaDivididaConfigSchema, AulaConfigSchema, NarradoConfigSchema, CtaFinalSchema } from "./split";
+import { FORMATOS, TelaDivididaConfigSchema, AulaConfigSchema, NarradoConfigSchema, CtaFinalSchema, CaixinhaPerguntaSchema } from "./split";
 
 // Reexporta os módulos de legenda e de formatos (schemas, tipos e helpers puros)
 // para que consumidores importando "@pontob/schema" tenham tudo num ponto só.
@@ -245,6 +245,9 @@ export const ReelPropsSchema = z
     aula: AulaConfigSchema.optional(),
     narrado: NarradoConfigSchema.optional(),
     cta_final: CtaFinalSchema.optional(),
+    // Caixinha de pergunta (sticker do Instagram). Overlay opcional em qualquer
+    // formato; no formato "caixinha_pergunta" é o elemento central da edição.
+    caixinha: CaixinhaPerguntaSchema.optional(),
   })
   .strict();
 

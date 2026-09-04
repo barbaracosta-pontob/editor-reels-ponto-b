@@ -82,6 +82,17 @@ export async function POST(
   // entende inserts — chamar refine() aqui sempre falha na validação. Preserva o
   // layout/trim/CTA do job e só troca a lista de inserts.
   const formato = cenasAtuais.formato;
+
+  // Caixinha de pergunta: não há nada para a IA refinar — a edição é o vídeo
+  // inteiro + a copy digitada à mão. Chamar refine() aqui falharia na validação
+  // (cenas: []), então devolve o estado atual sem tocar em nada.
+  if (formato === "caixinha_pergunta") {
+    return NextResponse.json({
+      scenes: cenasAtuais,
+      metadata: { semRefino: true, motivo: "Formato caixinha de pergunta não usa refino por IA." },
+    });
+  }
+
   if (formato === "tela_dividida" || formato === "narrado") {
     try {
       const briefFinal = [rawEsp.brief_padrao, brief].filter(Boolean).join("\n\n---\nBRIEF DO JOB:\n") || undefined;

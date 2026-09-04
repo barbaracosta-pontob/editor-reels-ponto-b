@@ -26,6 +26,7 @@ const FORMATO_LABEL: Record<string, string> = {
   tela_dividida: "Tela dividida",
   aula: "Aula",
   narrado: "Narrado",
+  caixinha_pergunta: "Caixinha de pergunta",
 };
 
 const OUTPUT_LABEL: Record<string, string> = {

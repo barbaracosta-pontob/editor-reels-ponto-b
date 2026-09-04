@@ -13,7 +13,7 @@ import { z } from "zod";
  * Módulo puro — sem React / sem Remotion.
  */
 
-export const FORMATOS = ["cenas", "tela_dividida", "aula", "narrado"] as const;
+export const FORMATOS = ["cenas", "tela_dividida", "aula", "narrado", "caixinha_pergunta"] as const;
 export type Formato = (typeof FORMATOS)[number];
 
 // ── Formato "Aula" ───────────────────────────────────────────────────────────
@@ -84,6 +84,35 @@ export const CtaFinalSchema = z.object({
   duracao_segundos: z.number().min(1).max(12).default(4),
 });
 export type CtaFinal = z.infer<typeof CtaFinalSchema>;
+
+// ── Caixinha de pergunta ─────────────────────────────────────────────────────
+// Réplica do sticker de pergunta do Instagram sobreposta ao vídeo: um header
+// escuro ("Faça uma pergunta") + um cartão branco com a pergunta. A copy é
+// escrita à mão no editor — não vem do transcript nem do LLM.
+//
+// Existe em dois usos:
+// 1. OVERLAY — ligável em qualquer formato (cenas, tela dividida, aula, narrado).
+// 2. FORMATO "caixinha_pergunta" — preset: especialista em tela cheia + legenda
+//    contínua + a caixinha, sem inserts e sem timeline de cenas.
+//
+// O intervalo (inicio_segundos/fim_segundos) está na linha do tempo do VÍDEO
+// BRUTO, igual aos inserts — o render desconta video_start_segundos.
+export const CaixinhaPerguntaSchema = z.object({
+  ativo: z.boolean().default(true),
+  // Texto do header escuro. Vazio => o header não é renderizado.
+  header: z.string().max(40).default("Faça uma pergunta"),
+  // A pergunta em si (o que o especialista está respondendo).
+  pergunta: z.string().max(220).default(""),
+  inicio_segundos: z.number().min(0).default(0),
+  fim_segundos: z.number().min(0).default(5),
+  // Centro vertical do cartão, em % da altura do frame (0 = topo).
+  posicao_y: z.number().min(5).max(95).default(62),
+  // Largura do cartão em % da largura do frame.
+  largura_pct: z.number().min(40).max(95).default(76),
+  // Entrada do sticker.
+  animacao: z.enum(["spring", "fade", "nenhuma"]).default("spring"),
+});
+export type CaixinhaPergunta = z.infer<typeof CaixinhaPerguntaSchema>;
 
 // ── Formato "Narrado" ────────────────────────────────────────────────────────
 // A voz do especialista conduz e os inserts cobrem a tela inteira. Reusa o

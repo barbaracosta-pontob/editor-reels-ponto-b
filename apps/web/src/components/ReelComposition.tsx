@@ -18,7 +18,7 @@ import {
   Img,
 } from "remotion";
 import { useEffect } from "react";
-import type { ReelProps, Cena, LegendaConfig, LegendaPalavra, Regiao, CtaFinal as CtaFinalConfig } from "@pontob/schema";
+import type { ReelProps, Cena, LegendaConfig, LegendaPalavra, Regiao, CtaFinal as CtaFinalConfig, CaixinhaPergunta as CaixinhaConfig } from "@pontob/schema";
 import { agruparEmFrases, posicaoEfetiva, cenaSuprimeLegenda } from "@pontob/schema";
 
 const FPS = 30;
@@ -163,16 +163,28 @@ export const ReelForPlayer: React.FC<ReelProps> = (props) => {
 
   // Formato "tela dividida": layout próprio (espelho de TelaDividida do render).
   if (props.formato === "tela_dividida") {
-    return <SplitLayoutPlayer props={props} />;
+    return comCaixinha(<SplitLayoutPlayer props={props} />);
   }
   if (props.formato === "aula") {
-    return <AulaLayoutPlayer props={props} />;
+    return comCaixinha(<AulaLayoutPlayer props={props} />);
   }
+  // Caixinha de pergunta: overlay compartilhado por todos os formatos (espelho
+  // do comCaixinha de Reel.tsx).
+  const comCaixinha = (conteudo: React.ReactNode) => (
+    <AbsoluteFill>
+      {conteudo}
+      <CaixinhaPerguntaSequencePlayer props={props} />
+    </AbsoluteFill>
+  );
+
   if (props.formato === "narrado") {
-    return <NarradoLayoutPlayer props={props} />;
+    return comCaixinha(<NarradoLayoutPlayer props={props} />);
+  }
+  if (props.formato === "caixinha_pergunta") {
+    return comCaixinha(<CaixinhaLayoutPlayer props={props} />);
   }
 
-  return (
+  return comCaixinha(
     <AbsoluteFill style={{ backgroundColor: colors.navy }}>
       {videoPath ? (
         <Video
@@ -223,7 +235,7 @@ export const ReelForPlayer: React.FC<ReelProps> = (props) => {
             .map(({ inicioFrames, duracaoFrames }) => [inicioFrames, inicioFrames + duracaoFrames] as [number, number])}
         />
       ) : null}
-    </AbsoluteFill>
+    </AbsoluteFill>,
   );
 };
 
@@ -585,6 +597,151 @@ const NarradoLayoutPlayer: React.FC<{ props: ReelProps }> = ({ props }) => {
 };
 
 // ── Aula (espelho de apps/remotion/src/scenes/AulaLayout.tsx) ─────────────────
+
+// ── Caixinha de pergunta (espelho de apps/remotion/src/scenes/CaixinhaPergunta) ──
+
+const CAIXINHA_FONT =
+  '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+
+const CaixinhaPerguntaCardPlayer: React.FC<{ config: CaixinhaConfig }> = ({ config }) => {
+  const frame = useCurrentFrame();
+  const { fps, width, height } = useVideoConfig();
+  const scale = Math.min(width / 1080, height / 1920);
+
+  const entrada =
+    config.animacao === "nenhuma"
+      ? 1
+      : config.animacao === "fade"
+      ? interpolate(frame, [0, Math.round(fps * 0.35)], [0, 1], { extrapolateRight: "clamp" })
+      : spring({ frame, fps, config: { damping: 13, stiffness: 110 } });
+
+  const opacity = interpolate(entrada, [0, 1], [0, 1], { extrapolateRight: "clamp" });
+  const pop = config.animacao === "spring" ? interpolate(entrada, [0, 1], [0.82, 1]) : 1;
+
+  const larguraCard = Math.round((width * (config.largura_pct ?? 76)) / 100);
+  const radius = Math.round(28 * scale);
+  const sombra = `0 ${Math.round(10 * scale)}px ${Math.round(28 * scale)}px rgba(0,0,0,0.28)`;
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: "none" }}>
+      <div
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: `${config.posicao_y ?? 62}%`,
+          transform: `translate(-50%, -50%) scale(${pop})`,
+          opacity,
+          width: larguraCard,
+          // Header e pergunta são UM bloco só (como no sticker do Instagram):
+          // sem gap, cantos arredondados só no perímetro externo. O overflow
+          // hidden é o que recorta os cantos internos das duas faixas.
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "stretch",
+          borderRadius: radius,
+          overflow: "hidden",
+          boxShadow: sombra,
+          fontFamily: CAIXINHA_FONT,
+        }}
+      >
+        {config.header ? (
+          <div
+            style={{
+              background: "#1E1E1E",
+              color: "#FFFFFF",
+              padding: `${Math.round(18 * scale)}px ${Math.round(34 * scale)}px`,
+              fontSize: Math.round(40 * scale),
+              fontWeight: 700,
+              letterSpacing: -0.2,
+              width: "100%",
+              textAlign: "center",
+              boxSizing: "border-box",
+              wordBreak: "break-word",
+            }}
+          >
+            {config.header}
+          </div>
+        ) : null}
+
+        <div
+          style={{
+            background: "#F2F2F2",
+            color: "#1E1E1E",
+            padding: `${Math.round(30 * scale)}px ${Math.round(34 * scale)}px`,
+            fontSize: Math.round(46 * scale),
+            fontWeight: 600,
+            lineHeight: 1.28,
+            textAlign: "center",
+            width: "100%",
+            boxSizing: "border-box",
+            wordBreak: "break-word",
+          }}
+        >
+          {config.pergunta || "Escreva a pergunta no editor"}
+        </div>
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+const CaixinhaPerguntaSequencePlayer: React.FC<{ props: ReelProps }> = ({ props }) => {
+  const cfg = props.caixinha;
+  if (!cfg?.ativo) return null;
+  if (!cfg.pergunta && !cfg.header) return null;
+  const videoStart = props.video_start_segundos ?? 0;
+  const from = Math.max(0, Math.round((cfg.inicio_segundos - videoStart) * FPS));
+  const dur = Math.max(1, Math.round((cfg.fim_segundos - cfg.inicio_segundos) * FPS));
+  return (
+    <Sequence from={from} durationInFrames={dur} name="caixinha-pergunta">
+      <CaixinhaPerguntaCardPlayer config={cfg} />
+    </Sequence>
+  );
+};
+
+/** Formato "caixinha_pergunta": especialista em tela cheia + legenda. */
+const CaixinhaLayoutPlayer: React.FC<{ props: ReelProps }> = ({ props }) => {
+  const videoPath = props.video_original_path ?? "";
+  const videoStart = props.video_start_segundos ?? 0;
+  const videoStartFrom = Math.round(videoStart * FPS);
+  const videoEndRaw = (props as Record<string, unknown>).video_end_segundos;
+  const videoEndAt =
+    typeof videoEndRaw === "number" && videoEndRaw > videoStart ? Math.round(videoEndRaw * FPS) : undefined;
+  const legenda = props.legenda;
+
+  return (
+    <AbsoluteFill style={{ backgroundColor: colors.navy }}>
+      {videoPath ? (
+        <Video
+          src={videoPath}
+          startFrom={videoStartFrom}
+          {...(videoEndAt != null ? { endAt: videoEndAt } : {})}
+          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        />
+      ) : null}
+
+      {props.musica_fundo ? (
+        <Audio
+          src={`/musica/${props.musica_fundo.path.replace(/^musica\//, "")}`}
+          volume={Math.min(1, (props.musica_fundo.volume ?? 3) / 10)}
+        />
+      ) : null}
+
+      {legenda?.ativa && props.legenda_palavras && props.legenda_palavras.length > 0 ? (
+        <LegendaOverlay
+          palavras={props.legenda_palavras}
+          config={legenda}
+          corPrimaria={props.cor_primaria}
+          corSecundaria={props.cor_secundaria}
+          fonteFamilia={props.fonte_familia}
+          videoStartSegundos={videoStart}
+          janelasSuprimidas={[]}
+        />
+      ) : null}
+
+      <CtaFinalSequencePlayer props={props} />
+    </AbsoluteFill>
+  );
+};
 
 const CropViewPlayer: React.FC<{
   src: string; regiao: Regiao; fit: "cover" | "contain";

@@ -6,7 +6,7 @@ import Link from "next/link";
 import { AppNav } from "@/components/AppNav";
 import { ActionButton } from "@/components/ActionButton";
 import type { Job, Cena } from "@/types";
-import type { ReelProps, LegendaConfig, LegendaPalavra, LegendaFrase, TelaDivididaConfig, AulaConfig, NarradoConfig, CtaFinal } from "@pontob/schema";
+import type { ReelProps, LegendaConfig, LegendaPalavra, LegendaFrase, TelaDivididaConfig, AulaConfig, NarradoConfig, CtaFinal, CaixinhaPergunta } from "@pontob/schema";
 import { agruparEmFrases, LegendaConfigSchema, reescreverFrase } from "@pontob/schema";
 import styles from "./EditorView.module.css";
 
@@ -132,6 +132,12 @@ export function EditorView({ job, onNew }: EditorViewProps) {
   const [narradoConfig, setNarradoConfig] = useState<NarradoConfig | undefined>(
     (job.scenes as Record<string, unknown>)?.narrado as NarradoConfig | undefined,
   );
+  // Caixinha de pergunta — overlay (sticker do Instagram) ligável em QUALQUER
+  // formato. No formato "caixinha_pergunta" já vem preenchida do processamento.
+  const [caixinha, setCaixinha] = useState<CaixinhaPergunta | null>(
+    ((job.scenes as Record<string, unknown>)?.caixinha as CaixinhaPergunta) ?? null,
+  );
+
   // CTA final (encerramento) — editável nos formatos novos.
   const [ctaFinal, setCtaFinal] = useState<CtaFinal | null>(
     ((job.scenes as Record<string, unknown>)?.cta_final as CtaFinal) ?? null,
@@ -255,8 +261,9 @@ export function EditorView({ job, onNew }: EditorViewProps) {
       aula: aulaConfig ?? undefined,
       narrado: narradoConfig ?? undefined,
       cta_final: ctaFinal ?? undefined,
+      caixinha: caixinha ?? undefined,
     } as ReelProps;
-  }, [scenes, duracaoPlayer, job.id, musicaFundo, videoStartSegundos, videoEndSegundos, legendaConfig, legendaPalavras, formato, telaDividida, aulaConfig, narradoConfig, ctaFinal, ctaDur]);
+  }, [scenes, duracaoPlayer, job.id, musicaFundo, videoStartSegundos, videoEndSegundos, legendaConfig, legendaPalavras, formato, telaDividida, aulaConfig, narradoConfig, ctaFinal, ctaDur, caixinha]);
 
   /**
    * Acompanha o render fazendo polling de jobs/<id>/render-status.json.
@@ -374,6 +381,7 @@ export function EditorView({ job, onNew }: EditorViewProps) {
           aula: aulaConfig ?? undefined,
           narrado: narradoConfig ?? undefined,
           cta_final: ctaFinal ?? undefined,
+          caixinha: caixinha ?? undefined,
         }),
       });
       if (!saveRes.ok) {
@@ -779,6 +787,96 @@ export function EditorView({ job, onNew }: EditorViewProps) {
               />
             </label>
           ))}
+        </div>
+      )}
+
+      {/* Caixinha de pergunta — overlay disponível em TODOS os formatos. */}
+      {caixinha ? (
+        <div className={styles.musicaBar} style={{ flexWrap: "wrap", gap: 12 }}>
+          <span className={styles.musicaLabel}>&#128172; Caixinha de pergunta</span>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <input type="checkbox" checked={!!caixinha.ativo} onChange={(e) => setCaixinha({ ...caixinha, ativo: e.target.checked })} />
+            Ativo
+          </label>
+          <input
+            type="text"
+            placeholder="Header (ex: Faca uma pergunta)"
+            value={caixinha.header}
+            onChange={(e) => setCaixinha({ ...caixinha, header: e.target.value.slice(0, 40) })}
+            style={{ width: 190, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 6, color: "#e9edf3", padding: "6px 10px", fontSize: 13 }}
+          />
+          <input
+            type="text"
+            placeholder="Pergunta (o que o especialista esta respondendo)"
+            value={caixinha.pergunta}
+            onChange={(e) => setCaixinha({ ...caixinha, pergunta: e.target.value.slice(0, 220) })}
+            style={{ flex: "1 1 300px", minWidth: 220, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 6, color: "#e9edf3", padding: "6px 10px", fontSize: 13 }}
+          />
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <span>Entra (s)</span>
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={caixinha.inicio_segundos}
+              onChange={(e) => {
+                const v = Math.max(0, Number(e.target.value) || 0);
+                setCaixinha({ ...caixinha, inicio_segundos: v, fim_segundos: Math.max(v + 0.5, caixinha.fim_segundos) });
+              }}
+              style={{ width: 62, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 5, color: "#e9edf3", padding: "3px 6px", fontSize: 12 }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <span>Sai (s)</span>
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={caixinha.fim_segundos}
+              onChange={(e) => setCaixinha({ ...caixinha, fim_segundos: Math.max(caixinha.inicio_segundos + 0.5, Number(e.target.value) || 0) })}
+              style={{ width: 62, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 5, color: "#e9edf3", padding: "3px 6px", fontSize: 12 }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <span>Altura</span>
+            <input type="range" min={5} max={95} step={1} value={caixinha.posicao_y}
+              onChange={(e) => setCaixinha({ ...caixinha, posicao_y: Number(e.target.value) })} style={{ width: 90 }} />
+            <span style={{ width: 34, textAlign: "right" }}>{caixinha.posicao_y}%</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
+            <span>Largura</span>
+            <input type="range" min={40} max={95} step={1} value={caixinha.largura_pct}
+              onChange={(e) => setCaixinha({ ...caixinha, largura_pct: Number(e.target.value) })} style={{ width: 90 }} />
+            <span style={{ width: 34, textAlign: "right" }}>{caixinha.largura_pct}%</span>
+          </label>
+          {formato !== "caixinha_pergunta" ? (
+            <button type="button" className={styles.btnGhost} onClick={() => setCaixinha(null)} title="Remover a caixinha deste reel">
+              Remover
+            </button>
+          ) : null}
+        </div>
+      ) : (
+        <div className={styles.musicaBar}>
+          <span className={styles.musicaLabel}>&#128172; Caixinha de pergunta</span>
+          <button
+            type="button"
+            className={styles.btnGhost}
+            onClick={() =>
+              setCaixinha({
+                ativo: true,
+                header: "Faca uma pergunta",
+                pergunta: "",
+                inicio_segundos: videoStartSegundos,
+                fim_segundos: videoStartSegundos + 5,
+                posicao_y: 62,
+                largura_pct: 76,
+                animacao: "spring",
+              })
+            }
+          >
+            Adicionar sticker de pergunta
+          </button>
+          <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Reproduz a caixinha do Instagram sobre o video. A copy e escrita aqui.</span>
         </div>
       )}
 

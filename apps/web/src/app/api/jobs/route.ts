@@ -17,7 +17,7 @@ import { analyze, planejarInserts } from "../../../services/analysis-bridge";
 import { buscarInserts } from "../../../services/inserts";
 import { getEspecialistaOrGenerico } from "../../../lib/db";
 import { getVideoDuration } from "../../../lib/video-duration";
-import { LegendaConfigSchema, transcriptToLegendaPalavras, type LegendaConfig, AulaConfigSchema } from "@pontob/schema";
+import { LegendaConfigSchema, transcriptToLegendaPalavras, type LegendaConfig, AulaConfigSchema, CaixinhaPerguntaSchema } from "@pontob/schema";
 import { todosJobsDirs } from "@/lib/jobsDir";
 
 const execFileAsync = promisify(execFile);
@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
         const especialistaSlug = (form.get("especialista_slug") as string) ?? "generico";
         // Formato de edição escolhido na tela inicial (default: cenas).
         const formatoRaw = (form.get("formato") as string) ?? "cenas";
-        const formato = ["tela_dividida", "aula", "narrado"].includes(formatoRaw) ? formatoRaw : "cenas";
+        const formato = ["tela_dividida", "aula", "narrado", "caixinha_pergunta"].includes(formatoRaw) ? formatoRaw : "cenas";
 
         // Configuração de legenda contínua (opcional). Vem como JSON no form.
         const legendaRaw = (form.get("legenda") as string) ?? "";
@@ -250,6 +250,50 @@ export async function POST(req: NextRequest) {
               scenesPath: scenesPathInserts,
               status: "ready",
               scenes: scenesInserts,
+              outputPath: null,
+              error: null,
+              createdAt: new Date().toISOString(),
+              especialista_slug: especialistaSlug,
+            },
+          });
+          return;
+        }
+
+        // --- FORMATO CAIXINHA DE PERGUNTA: especialista em tela cheia + sticker ---
+        // Sem LLM e sem inserts: a pergunta é digitada no editor. A caixinha
+        // entra em 0 e sai em 5s por padrão (ou no fim do vídeo, se for menor).
+        if (formato === "caixinha_pergunta") {
+          const videoEndCx = videoDuration != null ? Math.round(videoDuration * 10) / 10 : 0;
+          const fimCaixinha = videoEndCx > 0 ? Math.min(5, videoEndCx) : 5;
+          const scenesCx = {
+            duracao_total_estimada: videoEndCx + ctaDur,
+            video_original_path: videoPath,
+            video_start_segundos: 0,
+            video_end_segundos: videoEndCx,
+            cenas: [],
+            cta_final: ctaFinal,
+            cor_primaria: rawEspecialista.cor_primaria || undefined,
+            cor_secundaria: rawEspecialista.cor_secundaria || undefined,
+            fonte_url: rawEspecialista.fonte_url || undefined,
+            fonte_familia: rawEspecialista.fonte_familia || undefined,
+            especialista_slug: especialistaSlug,
+            formato: "caixinha_pergunta",
+            caixinha: CaixinhaPerguntaSchema.parse({ fim_segundos: fimCaixinha }),
+            legenda: legendaConfig ?? LegendaConfigSchema.parse({}),
+            legenda_palavras: transcriptToLegendaPalavras(transcript),
+          };
+          const scenesPathCx = path.join(jobDir, "scenes.json");
+          await writeFile(scenesPathCx, JSON.stringify(scenesCx, null, 2), "utf-8");
+          emit({
+            type: "done",
+            job: {
+              id: jobId,
+              fileName: videoFile.name,
+              videoPath,
+              transcriptPath,
+              scenesPath: scenesPathCx,
+              status: "ready",
+              scenes: scenesCx,
               outputPath: null,
               error: null,
               createdAt: new Date().toISOString(),

@@ -13,13 +13,47 @@ const nextConfig = {
   transpilePackages: ["@pontob/schema", "@remotion/player", "remotion"],
   distDir: process.env.NEXT_DIST_DIR || ".next",
 
-  webpack(config) {
+  webpack(config, { dev }) {
     // Garante que @pontob/schema resolve para o pacote do monorepo,
     // mesmo quando importado de arquivos fora de apps/web (ex: services/analysis)
     config.resolve.alias = {
       ...config.resolve.alias,
       "@pontob/schema": path.resolve(__dirname, "../../packages/schema"),
     };
+
+    if (dev) {
+      // O watcher do webpack observa o repo inteiro, e o pipeline escreve MUITO
+      // dentro dele durante um render: jobs/<id>/render-status.json e reescrito
+      // a cada ~400ms (mais de 2000 vezes num render de 15 min), mais o
+      // render-<fmt>.log, os mp4 de saida e os inserts baixados.
+      //
+      // Cada uma dessas escritas acorda o watcher. O resultado era recompilacao
+      // continua durante o render e, quando o Fast Refresh nao conseguia aplicar
+      // a quente, um RELOAD COMPLETO do navegador - que jogava o usuario de volta
+      // para a home no meio da exportacao, porque o job aberto vive so na memoria
+      // do React. O aviso "Fast Refresh had to perform a full reload" no console
+      // e o sintoma.
+      //
+      // Nada aqui e codigo-fonte: sao dados de trabalho. Ignorar e seguro e tira
+      // o render do caminho do watcher.
+      const ignorados = [
+        "**/.git/**",
+        "**/node_modules/**",
+        path.resolve(__dirname, "../../jobs/**"),
+        path.resolve(__dirname, "../../jobs-instance*/**"),
+        path.resolve(__dirname, "../../.transcript-cache/**"),
+        path.resolve(__dirname, "../../exports/**"),
+        path.resolve(__dirname, "../../_to_delete/**"),
+      ];
+      config.watchOptions = {
+        ...config.watchOptions,
+        ignored: ignorados,
+        // Junta rajadas de eventos numa recompilacao so, em vez de uma por
+        // arquivo tocado.
+        aggregateTimeout: 400,
+      };
+    }
+
     return config;
   },
 

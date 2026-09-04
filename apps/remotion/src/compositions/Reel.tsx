@@ -19,6 +19,7 @@ import { LegendaContinua } from "../scenes/LegendaContinua";
 import { TelaDividida } from "../scenes/TelaDividida";
 import { AulaLayout } from "../scenes/AulaLayout";
 import { NarradoLayout } from "../scenes/NarradoLayout";
+import { CaixinhaPerguntaSequence, CaixinhaLayout } from "../scenes/CaixinhaPergunta";
 import { colors, resolveAudioSrc } from "../theme";
 
 export { ReelPropsSchema, type ReelProps };
@@ -89,21 +90,37 @@ export const Reel: React.FC<ReelProps> = (props) => {
     ? Math.round((props.video_end_segundos as number) * FPS)
     : undefined;
 
+  // Caixinha de pergunta: overlay COMPARTILHADO por todos os formatos. Fica por
+  // cima do layout escolhido — por isso é anexado aqui, uma vez só, em vez de
+  // dentro de cada layout.
+  const comCaixinha = (conteudo: React.ReactNode) => (
+    <AbsoluteFill>
+      {conteudo}
+      <CaixinhaPerguntaSequence props={props} />
+    </AbsoluteFill>
+  );
+
   // Formato "tela dividida": layout próprio (especialista + inserts), não a
   // timeline de cenas. Legenda entra na junção das telas.
   if (props.formato === "tela_dividida") {
-    return <TelaDividida props={props} />;
+    return comCaixinha(<TelaDividida props={props} />);
   }
 
   if (props.formato === "aula") {
-    return <AulaLayout props={props} />;
+    return comCaixinha(<AulaLayout props={props} />);
   }
 
   if (props.formato === "narrado") {
-    return <NarradoLayout props={props} />;
+    return comCaixinha(<NarradoLayout props={props} />);
   }
 
-  return (
+  // Formato "caixinha de pergunta": especialista em tela cheia + legenda, sem
+  // timeline de cenas. A caixinha em si vem do overlay compartilhado.
+  if (props.formato === "caixinha_pergunta") {
+    return comCaixinha(<CaixinhaLayout props={props} />);
+  }
+
+  return comCaixinha(
     <AbsoluteFill style={{ backgroundColor: colors.navy }}>
       {props.fonte_url ? <FontLoader fonteUrl={props.fonte_url} /> : null}
 
@@ -163,7 +180,7 @@ export const Reel: React.FC<ReelProps> = (props) => {
           janelasSuprimidas={janelasSuprimidas}
         />
       ) : null}
-    </AbsoluteFill>
+    </AbsoluteFill>,
   );
 };
 

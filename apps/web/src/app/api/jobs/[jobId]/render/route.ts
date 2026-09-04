@@ -201,12 +201,14 @@ async function executarRender(
   };
 
   // Throttle: o Remotion emite "Rendered X/Y" varias vezes por segundo. Escrever
-  // o arquivo a cada linha faria centenas de writes/s no disco a toa. 400ms e
-  // bem mais rapido que o intervalo de polling da UI (1s), entao nada e perdido.
+  // o arquivo a cada linha faria centenas de writes/s no disco a toa.
+  // 800ms ainda e mais rapido que o polling da UI (1s), entao nada e perdido, e
+  // sao ~1100 escritas num render de 15 min em vez de ~2200 - o que importa numa
+  // maquina que ja esta com o disco disputado pelo proprio render.
   let ultimoFlush = 0;
   async function flush(force = false) {
     const agora = Date.now();
-    if (!force && agora - ultimoFlush < 400) return;
+    if (!force && agora - ultimoFlush < 800) return;
     ultimoFlush = agora;
     status.updatedAt = agora;
     try {
