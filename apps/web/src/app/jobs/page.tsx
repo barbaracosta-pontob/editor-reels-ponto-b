@@ -54,10 +54,39 @@ export default function JobsPage() {
         .catch(() => { if (vivo) setLoading(false); });
     }
     carregar();
-    // Recarrega a cada 10s: um render que termina noutra aba (ou noutra
-    // instancia) aparece aqui sem precisar dar F5.
-    const t = setInterval(carregar, 10000);
-    return () => { vivo = false; clearInterval(t); };
+
+    // Recarrega a cada 30s para um render que termina noutra aba aparecer sem
+    // F5 - mas so com a aba VISIVEL. Numa maquina fraca a varredura de jobs
+    // custa caro, e nao faz sentido gastar CPU atualizando uma lista que
+    // ninguem esta olhando enquanto um render disputa os mesmos nucleos.
+    // (A primeira versao usava 10s sem checar visibilidade e as chamadas se
+    // empilhavam.)
+    let t: ReturnType<typeof setInterval> | null = null;
+    function iniciarPolling() {
+      if (t !== null) return;
+      t = setInterval(() => { if (!document.hidden) carregar(); }, 30000);
+    }
+    function pararPolling() {
+      if (t === null) return;
+      clearInterval(t);
+      t = null;
+    }
+    function aoMudarVisibilidade() {
+      if (document.hidden) {
+        pararPolling();
+      } else {
+        carregar(); // volta para a aba: atualiza na hora
+        iniciarPolling();
+      }
+    }
+    if (!document.hidden) iniciarPolling();
+    document.addEventListener("visibilitychange", aoMudarVisibilidade);
+
+    return () => {
+      vivo = false;
+      pararPolling();
+      document.removeEventListener("visibilitychange", aoMudarVisibilidade);
+    };
   }, []);
 
   return (

@@ -398,6 +398,35 @@ export async function POST(req: NextRequest) {
   });
 }
 
+type JobResumo = {
+  id: string;
+  fileName: string;
+  especialista_slug: string;
+  formato: string;
+  createdAt: string;
+  outputs: string[];
+  hasOutput: boolean;
+  rendering: boolean;
+  instancia: string;
+};
+
+// Cache por job, invalidado por mtime. A varredura ingenua relia e reparseava
+// os 98 scenes.json (11.8 KB de media, 1.1 MB somados) a CADA chamada de
+// /api/jobs - o handler levava 20-40s numa maquina de 2 nucleos com um render
+// em andamento. Agora o caso comum e so um statSync por arquivo; leitura e
+// JSON.parse acontecem apenas no job que realmente mudou.
+type Assinatura = { scenes: number; out: number; status: number };
+const cachePorJob = new Map<string, { assin: Assinatura; dados: JobResumo }>();
+
+// Cache da lista inteira. Absorve rajadas (varias abas + polling batendo junto)
+// sem repetir a varredura.
+let cacheLista: { t: number; dados: JobResumo[] } | null = null;
+const TTL_LISTA_MS = 4000;
+
+function mtimeOuZero(p: string): number {
+  try { return statSync(p).mtimeMs; } catch { return 0; }
+}
+
 /**
  * GET /api/jobs
  * Lista os jobs de TODAS as instancias, nao so os desta porta.
@@ -410,7 +439,12 @@ export async function POST(req: NextRequest) {
  */
 export async function GET() {
   try {
-    const jobs = [];
+    if (cacheLista && Date.now() - cacheLista.t < TTL_LISTA_MS) {
+      return Response.json(cacheLista.dados);
+    }
+
+    const jobs: JobResumo[] = [];
+    const vistos = new Set<string>();
 
     for (const base of todosJobsDirs()) {
       if (!existsSync(base)) continue;
@@ -430,7 +464,29 @@ export async function GET() {
         const scenesPath = path.join(jobDir, "scenes.json");
         // scenes.json e o que separa um job de verdade de um upload
         // interrompido ou do diretorio de cache de transcricao.
-        if (!existsSync(scenesPath)) continue;
+        const mtScenes = mtimeOuZero(scenesPath);
+        if (!mtScenes) continue;
+
+        const outDir = path.join(jobDir, "out");
+        const assin: Assinatura = {
+          scenes: mtScenes,
+          // mtime do diretorio muda quando um mp4 novo aparece nele
+          out: mtimeOuZero(outDir),
+          // o render vivo reescreve esse arquivo a cada ~400ms
+          status: mtimeOuZero(path.join(jobDir, "render-status.json")),
+        };
+
+        const cache = cachePorJob.get(jobDir);
+        const igual = cache
+          && cache.assin.scenes === assin.scenes
+          && cache.assin.out === assin.out
+          && cache.assin.status === assin.status;
+
+        if (igual) {
+          vistos.add(jobDir);
+          jobs.push(cache!.dados);
+          continue;
+        }
 
         let fileName = "";
         let especialista_slug = "generico";
@@ -444,7 +500,7 @@ export async function GET() {
         } catch { /* segue com o que tem */ }
 
         try {
-          createdAt = statSync(scenesPath).mtime.toISOString();
+          createdAt = new Date(mtScenes).toISOString();
         } catch { /* segue com o que tem */ }
 
         try {
@@ -453,25 +509,32 @@ export async function GET() {
           formato = scenes.formato ?? "cenas";
         } catch { /* segue com o que tem */ }
 
-        // Quais formatos ja foram renderizados de fato. A versao antiga so
-        // olhava "out/reel.mp4", nome legado que nenhum render atual gera -
-        // por isso hasOutput vinha false mesmo em job ja exportado.
+        // Quais formatos ja foram renderizados. Um readdir do out/ em vez de
+        // existsSync + statSync por formato (6 syscalls viram 1).
+        // A versao antiga olhava "out/reel.mp4", nome legado que nenhum render
+        // atual gera - por isso hasOutput vinha false ate em job ja exportado.
         const outputs: string[] = [];
-        for (const fmt of ["reels", "wide", "square"]) {
-          const f = path.join(jobDir, "out", `reel_${fmt}.mp4`);
+        if (assin.out) {
           try {
-            if (existsSync(f) && statSync(f).size > 0) outputs.push(fmt);
+            const arquivos = new Set(readdirSync(outDir));
+            for (const fmt of ["reels", "wide", "square"]) {
+              if (arquivos.has(`reel_${fmt}.mp4`)) outputs.push(fmt);
+            }
           } catch { /* ignora */ }
         }
 
-        // Render em andamento: mostra na lista para o job nao parecer parado.
+        // Render em andamento. So le o arquivo se ele foi tocado ha pouco: um
+        // render vivo escreve a cada ~400ms, entao status antigo = render
+        // antigo, e nao precisa de leitura nem de parse.
         let rendering = false;
-        try {
-          const st = JSON.parse(readFileSync(path.join(jobDir, "render-status.json"), "utf-8"));
-          rendering = st.status === "running";
-        } catch { /* sem render-status.json */ }
+        if (assin.status && Date.now() - assin.status < 120_000) {
+          try {
+            const st = JSON.parse(readFileSync(path.join(jobDir, "render-status.json"), "utf-8"));
+            rendering = st.status === "running";
+          } catch { /* arquivo sendo reescrito neste instante */ }
+        }
 
-        jobs.push({
+        const dados: JobResumo = {
           id: jobId,
           fileName,
           especialista_slug,
@@ -481,12 +544,22 @@ export async function GET() {
           hasOutput: outputs.length > 0,
           rendering,
           instancia,
-        });
+        };
+
+        cachePorJob.set(jobDir, { assin, dados });
+        vistos.add(jobDir);
+        jobs.push(dados);
       }
+    }
+
+    // Descarta do cache jobs que sumiram do disco, para o Map nao crescer sem fim.
+    for (const chave of cachePorJob.keys()) {
+      if (!vistos.has(chave)) cachePorJob.delete(chave);
     }
 
     jobs.sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));
 
+    cacheLista = { t: Date.now(), dados: jobs };
     return Response.json(jobs);
   } catch (err) {
     return Response.json({ error: String(err) }, { status: 500 });
