@@ -18,7 +18,8 @@
  */
 
 import { NextRequest } from "next/server";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import os from "node:os";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { createWriteStream, existsSync } from "node:fs";
 import path from "node:path";
@@ -30,10 +31,7 @@ import {
   type RenderStatus,
 } from "@/lib/renderStatus";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = process.env.JOBS_DIR
-  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
-  : path.join(REPO_ROOT, "jobs");
+import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
 const REMOTION_DIR = path.join(REPO_ROOT, "apps/remotion");
 
 // Remotion passa por 3 fases distintas durante o render. Cada uma emite
@@ -122,6 +120,50 @@ const FORMAT_CONFIG = {
 } as const;
 
 type FormatKey = keyof typeof FORMAT_CONFIG;
+
+/**
+ * Sobe a prioridade do processo de render (e de toda a arvore de filhos: node,
+ * chrome headless, ffmpeg) no Windows.
+ *
+ * POR QUE: o render roda numa janela de console em segundo plano. O Windows 11
+ * empurra processos de segundo plano para EcoQoS ("Modo de eficiencia") quando
+ * a maquina fica ociosa - clock reduzido e, em CPU hibrida, execucao nos nucleos
+ * de eficiencia. E a explicacao mais provavel para a sensacao de que o render
+ * anda mais rapido com alguem mexendo no computador.
+ *
+ * Best-effort de proposito: se o PowerShell nao existir, se faltar permissao ou
+ * se a arvore ja tiver mudado, nao acontece nada e o render segue normal. Nunca
+ * pode derrubar um job por causa de um ajuste de prioridade.
+ */
+function priorizarArvore(pid: number, jobId: string): void {
+  if (process.platform !== "win32") {
+    try { os.setPriority(pid, os.constants.priority.PRIORITY_ABOVE_NORMAL); } catch { /* ignora */ }
+    return;
+  }
+  // No Windows spawn usa shell: true, entao `pid` e o cmd.exe - os processos que
+  // interessam sao os descendentes. Espera alguns segundos para a arvore existir
+  // e entao sobe todo mundo de uma vez via CIM.
+  setTimeout(() => {
+    const ps = [
+      "$ErrorActionPreference='SilentlyContinue';",
+      `$alvo=@(${pid});`,
+      "for($i=0;$i -lt 4;$i++){",
+      "  $filhos=Get-CimInstance Win32_Process | Where-Object { $alvo -contains $_.ParentProcessId } | ForEach-Object { $_.ProcessId };",
+      "  if(-not $filhos){break};",
+      "  $alvo+=$filhos",
+      "};",
+      "foreach($p in $alvo){ try { (Get-Process -Id $p).PriorityClass='AboveNormal' } catch {} };",
+      "Write-Output $alvo.Count",
+    ].join(" ");
+    execFile("powershell", ["-NoProfile", "-Command", ps], (err, stdout) => {
+      if (err) {
+        console.warn(`[render ${jobId}] nao foi possivel ajustar a prioridade:`, err.message);
+        return;
+      }
+      console.log(`[render ${jobId}] prioridade AboveNormal aplicada a ${String(stdout).trim()} processo(s)`);
+    });
+  }, 8000);
+}
 
 // Guarda em memoria dos renders disparados por ESTE processo. Serve pra evitar
 // dois renders concorrentes do mesmo job. Nao e a fonte da verdade - o
@@ -213,6 +255,15 @@ async function executarRender(
         if (process.env.REMOTION_BROWSER_EXECUTABLE) {
           extraArgs.push(`--browser-executable=${process.env.REMOTION_BROWSER_EXECUTABLE}`);
         }
+        // Renderizador OpenGL do Chromium. O default headless e "swangle"
+        // (rasterizacao 100% por software na CPU). Em maquina com GPU decente,
+        // "angle" passa a rasterizacao para a placa e pode acelerar bastante.
+        // Fica atras de env porque o resultado depende da GPU/driver e, em
+        // alguns casos, muda sutilmente o antialiasing - tem que ser medido,
+        // nao presumido. Valores: swangle | angle | egl | swiftshader.
+        if (process.env.REMOTION_GL) {
+          extraArgs.push(`--gl=${process.env.REMOTION_GL}`);
+        }
 
         const child = spawn(bin, [
           "render",
@@ -228,6 +279,7 @@ async function executarRender(
 
         status.pid = child.pid ?? undefined;
         void flush(true);
+        if (child.pid) priorizarArvore(child.pid, jobId);
 
         function processChunk(chunk: Buffer) {
           const raw = chunk.toString();
@@ -327,12 +379,13 @@ export async function POST(
   { params }: { params: { jobId: string } }
 ) {
   const { jobId } = params;
-  const jobDir = path.join(JOBS_DIR, jobId);
-  const scenesPath = path.join(jobDir, "scenes.json");
+  // O job pode ter nascido noutra instancia; renderiza no diretorio dele.
+  const jobDir = acharJobDir(jobId);
 
-  if (!existsSync(scenesPath)) {
+  if (!jobDir) {
     return Response.json({ error: "Job nao encontrado" }, { status: 404 });
   }
+  const scenesPath = path.join(jobDir, "scenes.json");
 
   // Ja existe um render vivo pra esse job? Nao dispara outro - a UI so precisa
   // comecar a fazer polling. Isso tambem cobre o caso de o usuario dar F5 na

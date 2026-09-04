@@ -16,17 +16,14 @@ import { buscarInserts } from "../../../../../services/inserts";
 import { getEspecialistaOrGenerico } from "../../../../../lib/db";
 import { getVideoDuration } from "../../../../../lib/video-duration";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = process.env.JOBS_DIR
-  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
-  : path.join(REPO_ROOT, "jobs");
+import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
 
 export async function POST(
   req: NextRequest,
   { params }: { params: { jobId: string } },
 ) {
   const { jobId } = params;
-  const jobDir = path.join(JOBS_DIR, jobId);
+  const jobDir = jobDirOuLocal(jobId);
 
   let brief: string | undefined;
   try {

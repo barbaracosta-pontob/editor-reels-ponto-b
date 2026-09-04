@@ -92,3 +92,6 @@ _to_delete/
 
 # Cache de transcricoes do Whisper (conteudo-enderecado, reconstruivel)
 .transcript-cache/
+
+# Saida do diagnostico de hardware (especifica de cada maquina)
+scripts/diagnostico-maquina.txt

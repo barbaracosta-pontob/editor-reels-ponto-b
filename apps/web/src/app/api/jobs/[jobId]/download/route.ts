@@ -9,10 +9,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = process.env.JOBS_DIR
-  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
-  : path.join(REPO_ROOT, "jobs");
+import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
 
 const VALID_FORMATS = ["reels", "wide", "square"] as const;
 type FormatKey = typeof VALID_FORMATS[number];
@@ -22,7 +19,11 @@ export async function GET(
   { params }: { params: { jobId: string } }
 ) {
   const { jobId } = params;
-  const outDir = path.join(JOBS_DIR, jobId, "out");
+  const jobDir = acharJobDir(jobId);
+  if (!jobDir) {
+    return NextResponse.json({ error: "Job nao encontrado" }, { status: 404 });
+  }
+  const outDir = path.join(jobDir, "out");
 
   const formatParam = req.nextUrl.searchParams.get("format") as FormatKey | null;
 

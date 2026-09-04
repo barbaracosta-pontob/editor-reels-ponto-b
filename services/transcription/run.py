@@ -17,6 +17,58 @@ from pathlib import Path
 from faster_whisper import WhisperModel
 
 
+def detectar_device() -> str:
+    """
+    Decide entre "cuda" e "cpu" perguntando ao CTranslate2 - que e quem de fato
+    executa o modelo do faster-whisper.
+
+    POR QUE MUDOU (2026-09-03)
+    --------------------------
+    A versao anterior testava `torch.cuda.is_available()` dentro de um
+    try/except ImportError. Mas o torch NUNCA foi dependencia deste servico:
+    nao esta no requirements.txt nem instalado na .venv. Ou seja, o import
+    falhava sempre, caia no except e cravava "cpu" - mesmo numa maquina com
+    GPU NVIDIA ociosa ao lado. As 40 transcricoes do historico do projeto
+    rodaram todas em cpu/int8, a ~0.17x realtime (45s de audio = ~4 minutos).
+
+    `get_cuda_device_count()` vem do proprio ctranslate2, que ja e dependencia,
+    e responde a pergunta certa: existe GPU que ESTE runtime consegue usar.
+    """
+    forcado = os.getenv("WHISPER_DEVICE", "").strip().lower()
+    if forcado in ("cpu", "cuda"):
+        return forcado
+    try:
+        from ctranslate2 import get_cuda_device_count
+
+        n = get_cuda_device_count()
+        if n > 0:
+            print(f"[transcribe] {n} GPU(s) CUDA disponivel(is)", file=sys.stderr)
+            return "cuda"
+        print("[transcribe] nenhuma GPU CUDA visivel para o CTranslate2", file=sys.stderr)
+    except Exception as e:
+        print(f"[transcribe] deteccao de CUDA falhou ({e})", file=sys.stderr)
+    return "cpu"
+
+
+def threads_cpu() -> int:
+    """
+    Threads de computacao para o CTranslate2.
+
+    O default do CTranslate2 e 4 threads, independente do tamanho da maquina.
+    Num processador de 8+ nucleos isso deixa metade da CPU parada durante a
+    transcricao. Usamos metade dos nucleos logicos (piso de 4): melhora em
+    maquina grande e nunca fica pior que o default, e a folga evita que uma
+    transcricao sozinha estrangule o dev server e um render simultaneo.
+
+    Ajustavel por WHISPER_CPU_THREADS quando quiser calibrar na mao.
+    """
+    env = os.getenv("WHISPER_CPU_THREADS", "").strip()
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    logicos = os.cpu_count() or 4
+    return max(4, logicos // 2)
+
+
 def transcribe(
     input_path: str,
     output_path: str,
@@ -30,20 +82,44 @@ def transcribe(
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Arquivo não encontrado: {input_path}")
 
-    # Auto-detect device se não especificado
+    # Auto-detect device se nao especificado
     if device == "auto":
-        try:
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            device = "cpu"
+        device = detectar_device()
 
     compute_type = "float16" if device == "cuda" else "int8"
+    cpu_threads = threads_cpu()
 
-    print(f"[transcribe] modelo={model_size} device={device} compute_type={compute_type}", file=sys.stderr)
+    print(f"[transcribe] modelo={model_size} device={device} compute_type={compute_type} cpu_threads={cpu_threads}", file=sys.stderr)
     print(f"[transcribe] carregando modelo (primeira vez baixa ~3GB)...", file=sys.stderr)
     t0 = time.time()
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    try:
+        model = WhisperModel(
+            model_size,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=cpu_threads,
+        )
+    except Exception as e:
+        # No Windows a GPU pode ser detectada e mesmo assim o carregamento
+        # falhar por falta das DLLs de cuDNN/cuBLAS. Cair para CPU aqui e
+        # melhor do que abortar o job inteiro: o usuario perde velocidade,
+        # nao o resultado. A mensagem diz exatamente o que instalar.
+        if device != "cuda":
+            raise
+        print(
+            f"[transcribe] GPU detectada mas o modelo nao carregou ({e}).\n"
+            f"[transcribe] Faltam provavelmente as bibliotecas cuDNN 8.x / cuBLAS do CUDA.\n"
+            f"[transcribe] Continuando em CPU (mais lento).",
+            file=sys.stderr,
+        )
+        device = "cpu"
+        compute_type = "int8"
+        model = WhisperModel(
+            model_size,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=cpu_threads,
+        )
     print(f"[transcribe] modelo carregado em {time.time() - t0:.1f}s", file=sys.stderr)
 
     print(f"[transcribe] transcrevendo {input_path}...", file=sys.stderr)
@@ -94,6 +170,7 @@ def transcribe(
             "device": device,
             "compute_type": compute_type,
             "beam_size": beam_size,
+            "cpu_threads": cpu_threads,
             "elapsed_seconds": round(elapsed, 1),
         },
     }
@@ -113,7 +190,11 @@ def main():
     parser.add_argument("--model", default=os.getenv("WHISPER_MODEL", "large-v3"))
     parser.add_argument("--device", default=os.getenv("WHISPER_DEVICE", "auto"))
     parser.add_argument("--language", default="pt")
-    parser.add_argument("--beam-size", type=int, default=5)
+    # beam_size 5 e o default do faster-whisper. Em CPU fraca, 1 (greedy) corta
+    # ~40% do tempo com perda pequena em audio limpo de estudio. Fica em env
+    # para poder ser testado sem mudar codigo - e A/B com o cache de transcricao
+    # e barato: mesma chave de video, so muda o modelo/parametro.
+    parser.add_argument("--beam-size", type=int, default=int(os.getenv("WHISPER_BEAM_SIZE", "5")))
 
     args = parser.parse_args()
 

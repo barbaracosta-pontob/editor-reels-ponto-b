@@ -7,10 +7,7 @@ import { writeFile, readFile } from "node:fs/promises";
 import { existsSync, readdirSync, unlinkSync } from "node:fs";
 import path from "node:path";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = process.env.JOBS_DIR
-  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
-  : path.join(REPO_ROOT, "jobs");
+import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
 
 const MIME: Record<string, string> = {
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -19,7 +16,7 @@ const MIME: Record<string, string> = {
 
 export async function POST(req: NextRequest, { params }: { params: { jobId: string } }) {
   const { jobId } = params;
-  const jobDir = path.join(JOBS_DIR, jobId);
+  const jobDir = jobDirOuLocal(jobId);
   if (!existsSync(jobDir)) return new Response(JSON.stringify({ error: "Job nao encontrado" }), { status: 404 });
 
   const form = await req.formData();
@@ -38,7 +35,7 @@ export async function POST(req: NextRequest, { params }: { params: { jobId: stri
 
 export async function GET(_req: NextRequest, { params }: { params: { jobId: string } }) {
   const { jobId } = params;
-  const jobDir = path.join(JOBS_DIR, jobId);
+  const jobDir = jobDirOuLocal(jobId);
   const f = existsSync(jobDir) ? readdirSync(jobDir).find((n) => /^logo\./i.test(n)) : null;
   if (!f) return new Response(JSON.stringify({ error: "Logo nao encontrada" }), { status: 404 });
   const buf = await readFile(path.join(jobDir, f));

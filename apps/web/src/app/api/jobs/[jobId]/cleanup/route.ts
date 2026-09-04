@@ -9,16 +9,13 @@ import { rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = process.env.JOBS_DIR
-  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
-  : path.join(REPO_ROOT, "jobs");
+import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
 
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: { jobId: string } }
 ) {
-  const jobDir = path.join(JOBS_DIR, params.jobId);
+  const jobDir = jobDirOuLocal(params.jobId);
 
   if (!existsSync(jobDir)) {
     return NextResponse.json({ error: "Job não encontrado" }, { status: 404 });

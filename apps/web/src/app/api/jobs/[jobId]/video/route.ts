@@ -8,19 +8,17 @@ import { NextRequest } from "next/server";
 import { createReadStream, statSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = process.env.JOBS_DIR
-  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
-  : path.join(REPO_ROOT, "jobs");
+import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
 
 export async function GET(
   req: NextRequest,
   { params }: { params: { jobId: string } }
 ) {
   const { jobId } = params;
-  const jobDir = path.join(JOBS_DIR, jobId);
+  // Procura o job em TODAS as instancias, nao so no JOBS_DIR desta porta.
+  const jobDir = acharJobDir(jobId);
 
-  if (!existsSync(jobDir)) {
+  if (!jobDir) {
     return new Response(JSON.stringify({ error: "Job não encontrado" }), { status: 404 });
   }
 

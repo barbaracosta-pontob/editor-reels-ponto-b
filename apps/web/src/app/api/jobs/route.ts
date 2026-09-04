@@ -18,6 +18,7 @@ import { buscarInserts } from "../../../services/inserts";
 import { getEspecialistaOrGenerico } from "../../../lib/db";
 import { getVideoDuration } from "../../../lib/video-duration";
 import { LegendaConfigSchema, transcriptToLegendaPalavras, type LegendaConfig, AulaConfigSchema } from "@pontob/schema";
+import { todosJobsDirs } from "@/lib/jobsDir";
 
 const execFileAsync = promisify(execFile);
 
@@ -399,46 +400,89 @@ export async function POST(req: NextRequest) {
 
 /**
  * GET /api/jobs
- * Lista todos os jobs processados.
+ * Lista os jobs de TODAS as instancias, nao so os desta porta.
+ *
+ * Antes cada porta listava apenas o proprio JOBS_DIR, entao um job criado no
+ * localhost:3002 sumia no localhost:3004 e voltar num trabalho antigo exigia
+ * lembrar em qual aba ele tinha nascido. Jobs novos continuam nascendo no
+ * diretorio da instancia (e o que evita duas instancias colidirem); o que muda
+ * e so a visao: leitura unificada, escrita isolada.
  */
 export async function GET() {
   try {
-    const jobsDir = JOBS_DIR;
-    if (!existsSync(jobsDir)) return Response.json([]);
-
-    const entries = readdirSync(jobsDir, { withFileTypes: true });
     const jobs = [];
 
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const jobId = entry.name;
-      const jobDir = path.join(jobsDir, jobId);
-      const scenesPath = path.join(jobDir, "scenes.json");
-      if (!existsSync(scenesPath)) continue;
+    for (const base of todosJobsDirs()) {
+      if (!existsSync(base)) continue;
+      const instancia = path.basename(base);
 
-      let fileName = "";
-      let especialista_slug = "generico";
-      let createdAt = "";
-
+      let entries;
       try {
-        const files = readdirSync(jobDir);
-        const mp4 = files.find((f) => f.endsWith(".mp4"));
-        if (mp4) fileName = mp4;
-      } catch {}
+        entries = readdirSync(base, { withFileTypes: true });
+      } catch {
+        continue; // diretorio sumiu ou sem permissao
+      }
 
-      try {
-        const stat = statSync(scenesPath);
-        createdAt = stat.mtime.toISOString();
-      } catch {}
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const jobId = entry.name;
+        const jobDir = path.join(base, jobId);
+        const scenesPath = path.join(jobDir, "scenes.json");
+        // scenes.json e o que separa um job de verdade de um upload
+        // interrompido ou do diretorio de cache de transcricao.
+        if (!existsSync(scenesPath)) continue;
 
-      try {
-        const scenes = JSON.parse(readFileSync(scenesPath, "utf-8"));
-        especialista_slug = scenes.especialista_slug ?? "generico";
-      } catch {}
+        let fileName = "";
+        let especialista_slug = "generico";
+        let formato = "cenas";
+        let createdAt = "";
 
-      const hasOutput = existsSync(path.join(jobDir, "out", "reel.mp4"));
+        try {
+          const files = readdirSync(jobDir);
+          const mp4 = files.find((f) => f.endsWith(".mp4"));
+          if (mp4) fileName = mp4;
+        } catch { /* segue com o que tem */ }
 
-      jobs.push({ id: jobId, fileName, especialista_slug, createdAt, hasOutput });
+        try {
+          createdAt = statSync(scenesPath).mtime.toISOString();
+        } catch { /* segue com o que tem */ }
+
+        try {
+          const scenes = JSON.parse(readFileSync(scenesPath, "utf-8"));
+          especialista_slug = scenes.especialista_slug ?? "generico";
+          formato = scenes.formato ?? "cenas";
+        } catch { /* segue com o que tem */ }
+
+        // Quais formatos ja foram renderizados de fato. A versao antiga so
+        // olhava "out/reel.mp4", nome legado que nenhum render atual gera -
+        // por isso hasOutput vinha false mesmo em job ja exportado.
+        const outputs: string[] = [];
+        for (const fmt of ["reels", "wide", "square"]) {
+          const f = path.join(jobDir, "out", `reel_${fmt}.mp4`);
+          try {
+            if (existsSync(f) && statSync(f).size > 0) outputs.push(fmt);
+          } catch { /* ignora */ }
+        }
+
+        // Render em andamento: mostra na lista para o job nao parecer parado.
+        let rendering = false;
+        try {
+          const st = JSON.parse(readFileSync(path.join(jobDir, "render-status.json"), "utf-8"));
+          rendering = st.status === "running";
+        } catch { /* sem render-status.json */ }
+
+        jobs.push({
+          id: jobId,
+          fileName,
+          especialista_slug,
+          formato,
+          createdAt,
+          outputs,
+          hasOutput: outputs.length > 0,
+          rendering,
+          instancia,
+        });
+      }
     }
 
     jobs.sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));

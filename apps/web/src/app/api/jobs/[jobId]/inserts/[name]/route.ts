@@ -24,10 +24,7 @@ import { NextRequest } from "next/server";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import path from "node:path";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = process.env.JOBS_DIR
-  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
-  : path.join(REPO_ROOT, "jobs");
+import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
 
 /**
  * Node stream -> Web stream, respeitando backpressure: pausa a leitura do
@@ -76,7 +73,12 @@ export async function GET(
     return Response.json({ error: "Nome invalido" }, { status: 400 });
   }
 
-  const file = path.join(JOBS_DIR, jobId, "inserts", name);
+  const jobDir = acharJobDir(jobId);
+  if (!jobDir) {
+    return Response.json({ error: "Job nao encontrado" }, { status: 404 });
+  }
+
+  const file = path.join(jobDir, "inserts", name);
   if (!existsSync(file)) {
     return Response.json({ error: "Insert nao encontrado" }, { status: 404 });
   }

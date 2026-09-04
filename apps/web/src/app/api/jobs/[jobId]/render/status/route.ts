@@ -16,10 +16,7 @@ import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { readStatus, writeStatus, processoVivo } from "@/lib/renderStatus";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
-const JOBS_DIR = process.env.JOBS_DIR
-  ? path.resolve(REPO_ROOT, process.env.JOBS_DIR)
-  : path.join(REPO_ROOT, "jobs");
+import { acharJobDir, jobDirOuLocal, REPO_ROOT } from "@/lib/jobsDir";
 
 // Quanto tempo sem nenhum flush antes de suspeitar de orfao. O render escreve
 // no maximo a cada 400ms enquanto vivo, mas o bundling inicial pode ficar
@@ -31,9 +28,9 @@ export async function GET(
   { params }: { params: { jobId: string } },
 ) {
   const { jobId } = params;
-  const jobDir = path.join(JOBS_DIR, jobId);
+  const jobDir = acharJobDir(jobId);
 
-  if (!existsSync(jobDir)) {
+  if (!jobDir) {
     return Response.json({ error: "Job nao encontrado" }, { status: 404 });
   }
 
