@@ -161,15 +161,16 @@ export const ReelForPlayer: React.FC<ReelProps> = (props) => {
     document.head.appendChild(link);
   }, [props.fonte_url]);
 
-  // Formato "tela dividida": layout próprio (espelho de TelaDividida do render).
-  if (props.formato === "tela_dividida") {
-    return comCaixinha(<SplitLayoutPlayer props={props} />);
-  }
-  if (props.formato === "aula") {
-    return comCaixinha(<AulaLayoutPlayer props={props} />);
-  }
   // Caixinha de pergunta: overlay compartilhado por todos os formatos (espelho
   // do comCaixinha de Reel.tsx).
+  //
+  // A declaracao precisa vir ANTES do primeiro uso. Ela estava depois dos
+  // returns de "tela_dividida" e "aula", e como `const` nao sobe (fica na
+  // temporal dead zone ate a linha da declaracao), abrir o preview nesses dois
+  // formatos estourava "ReferenceError: Cannot access 'comCaixinha' before
+  // initialization". Os outros formatos funcionavam porque so alcancavam o
+  // comCaixinha depois da linha que o define. So o player era afetado - o
+  // render usa Reel.tsx, que tem a sua propria copia.
   const comCaixinha = (conteudo: React.ReactNode) => (
     <AbsoluteFill>
       {conteudo}
@@ -177,6 +178,13 @@ export const ReelForPlayer: React.FC<ReelProps> = (props) => {
     </AbsoluteFill>
   );
 
+  // Formato "tela dividida": layout próprio (espelho de TelaDividida do render).
+  if (props.formato === "tela_dividida") {
+    return comCaixinha(<SplitLayoutPlayer props={props} />);
+  }
+  if (props.formato === "aula") {
+    return comCaixinha(<AulaLayoutPlayer props={props} />);
+  }
   if (props.formato === "narrado") {
     return comCaixinha(<NarradoLayoutPlayer props={props} />);
   }
