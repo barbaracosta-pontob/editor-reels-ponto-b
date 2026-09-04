@@ -204,6 +204,75 @@
   background: var(--surface-float);
 }
 
+/* ── Aviso de render em andamento ─────────────────────────────── */
+
+/* Aparece na home quando existe exportacao rodando em qualquer instancia.
+   Existe porque o job aberto vive so na memoria do React: um reload no meio
+   da exportacao fazia o render sumir de vista mesmo continuando no servidor. */
+.renderAtivoBanner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 20px;
+  border: 1px solid var(--amber-border);
+  border-radius: var(--r-lg);
+  background: var(--amber-dim);
+}
+
+.renderAtivoDot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: renderAtivoPulso 1.6s ease-in-out infinite;
+}
+
+@keyframes renderAtivoPulso {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .renderAtivoDot { animation: none; }
+}
+
+.renderAtivoTexto {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.renderAtivoTexto strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.renderAtivoSub {
+  font-size: 12px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.renderAtivoLink {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.renderAtivoLink:hover {
+  text-decoration: underline;
+}
+
 /* ── Drop zone ────────────────────────────────────────────────── */
 
 .dropzone {

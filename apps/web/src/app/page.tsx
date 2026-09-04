@@ -44,6 +44,13 @@ export default function Home() {
   const [processingStep, setProcessingStep] = useState<ProcessingStep>("transcribing");
   // Sinalizado pelo servidor quando a transcricao veio do cache (Whisper pulado).
   const [transcriptCached, setTranscriptCached] = useState(false);
+  // Renders acontecendo agora, em QUALQUER instancia. A home nao sabia disso:
+  // se a aba recarregava no meio de uma exportacao (Fast Refresh, F5, browser
+  // reaberto), o job aberto - que vive so na memoria do React - sumia junto, e
+  // o render seguia rodando invisivel. Agora a home avisa e devolve o caminho.
+  const [rendersAtivos, setRendersAtivos] = useState<
+    { id: string; fileName: string; instancia?: string }[]
+  >([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
@@ -53,6 +60,32 @@ export default function Home() {
       .then((data: EspecialistaItem[]) => setEspecialistas(data))
       .catch(() => {});
   }, []);
+
+  // Procura renders em andamento enquanto a home esta na tela. So enquanto ela
+  // esta na tela mesmo: durante o processamento e no editor essa consulta seria
+  // desperdicio de CPU numa maquina que ja esta disputando nucleos com o render.
+  useEffect(() => {
+    if (screen !== "upload") return;
+
+    let vivo = true;
+    function checar() {
+      if (document.hidden) return;
+      fetch("/api/jobs", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : []))
+        .then((data) => {
+          if (!vivo || !Array.isArray(data)) return;
+          setRendersAtivos(
+            data
+              .filter((j) => j?.rendering)
+              .map((j) => ({ id: j.id, fileName: j.fileName, instancia: j.instancia })),
+          );
+        })
+        .catch(() => { /* servidor recompilando; o proximo ciclo pega */ });
+    }
+    checar();
+    const t = setInterval(checar, 20000);
+    return () => { vivo = false; clearInterval(t); };
+  }, [screen]);
 
   function handleFile(f: File) {
     if (!f.type.startsWith("video/")) return;
@@ -175,6 +208,31 @@ export default function Home() {
 
       {/* Painel direito */}
       <div className={styles.rightPanel}>
+
+        {rendersAtivos.length > 0 && (
+          <div className={styles.renderAtivoBanner}>
+            <span className={styles.renderAtivoDot} />
+            <div className={styles.renderAtivoTexto}>
+              <strong>
+                {rendersAtivos.length === 1
+                  ? "1 exportação em andamento"
+                  : `${rendersAtivos.length} exportações em andamento`}
+              </strong>
+              <span className={styles.renderAtivoSub}>
+                {rendersAtivos.map((r) => r.fileName || r.id).join(", ")}
+              </span>
+            </div>
+            {rendersAtivos.length === 1 ? (
+              <Link href={`/jobs/${rendersAtivos[0].id}`} className={styles.renderAtivoLink}>
+                Acompanhar →
+              </Link>
+            ) : (
+              <Link href="/jobs" className={styles.renderAtivoLink}>
+                Ver todos →
+              </Link>
+            )}
+          </div>
+        )}
 
         <div className={styles.formHeading}>
           <div className={styles.formHeadingRow}>
